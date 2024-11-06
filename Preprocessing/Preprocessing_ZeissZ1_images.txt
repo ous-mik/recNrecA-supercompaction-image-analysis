@@ -1,0 +1,49 @@
+Removing background noise from brightfield cell images:
+1. 	Duplicate image (stack) from original image. 
+		Original image stack should not be multidimensional hyperstack.
+		(Ctrl+Shift+D) 
+2. 	Apply Median-filter to duplicated image(s). 
+		(Process > Filters > Median > Radius = 10.0 pixels > OK)
+3. 	Subtract filtered image(s) from original image(s). 
+		(Process > Image Calculator... >
+		Image1=Original, Operation=Subtract, Image2=Filtered Duplicate, 
+		Check boxes "Create new window" and "32-bit (float) result" > OK)
+4. 	Change image type to 16-bit for image (stack).
+		(Image > Type > 16-bit)
+5. 	Store resulting image (stack) for later.
+
+
+----------------------
+Removing background noise from fluorescence images:
+1. 	Duplicate image (stack) from original image. 
+		Original image stack should not be multidimensional hyperstack.
+		(Ctrl+Shift+D) 
+2. 	Subtract background using rolling ball algorithm.
+		(Process > Subtract background... > Radius = 5.0 pixels
+		Check box "Sliding paraboloid" (no other) > OK)
+3. 	Store resulting image (stack) for later.
+
+
+----------------------
+Combine corrected channels into image(s) for analyses:
+1.	Merge the background corrected channels into one hyperstack. 
+	Normally, use grey for brightfield cells, and colors for the fluorescence images.
+		(Image > Color > Merge channels... >
+		C2(green) = fluorescence channel, C4(gray) = cell channel, 
+		Check boxes "Create composite", "Keep source images" and "Ignore source LUTs" > OK)
+2. 	Arrange the order of the channels after your own preference. 
+		(Image > Color > Arrange Channels...)
+
+
+----------------------
+Prepare image(s) for figures:
+1. 	Modify brightness and contrast for channels in merged hyperstack. 
+		(Image > Adjust > Brightness/Contrast...)
+			Adjust the brightness/contrast of the channels to make sure you can see them as intended. 
+			Use the channel slider to select the channel you will adjust the brightness/contrast for. 
+2. 	For making figures, change image (stack) to RGB
+		(Image > Type > RGB Color)
+			The resulting image (stack) will have the brightness settings determined from the last step. 
+			The image (stack) can be saved as TIFF or other formats and will appear in figures and 
+			slides as intended. 
+			Alternatively, the image (stack) can be annotated with sample name, treatment and time. 		

@@ -1,0 +1,4009 @@
+// vischer@science.uva.nl
+//
+// Coli-Inspector-03f 10.07.14 23:40
+// Special twin version for Tanneke
+// http://simon.bio.uva.nl/objectj/examples/Coli-Inspector/
+//
+// Coli-Inspector Overview
+// ===========================
+// - Calculates threshold in 1st channel (calcThreshold)
+// - Analyzes Particles and put rois to roi manager
+// - Post-processes each roi:
+// - Long particles are scanned with perpendicular slit (doSlitScan)
+// - Short particles are assumed to be rod (roiToRod)
+// - Places the markers if cell meets shape conditions
+// - Annotates cell if it fails any of 6 shape criteria (Kink, Bump, NoTube etc)
+// - Diameter is calculated from cell length and area, assuming rod shape
+// - Vector markers have floating point (sub-pixel) precision
+// - Constrictions are marked with an invisible line and visible end points
+// - Profiles of diameter and fluorescence along axes are arranged as "Maps"
+// - Measures and marks spots in fluorescent channels
+
+
+// This is a customized version of Coli-Inspector. Changes are annotated with the comment 'Added by KV'. 
+
+
+
+// - Take care of Advance[a] and Display mode[d] shortcuts
+var 
+lastTime,
+//----------------- start user defined parameters -------------------------
+//particle tracer:
+thrFraction = 0.4, //threshold fraction for "custom":  larger value = smaller particle (default: 0.4 above backgnd)
+thrMethod = "Custom", //thresholding method such as "Li", Triangle" etc. default = "Custom"
+minParticleArea = 3, //particle analyzer rejects cells with less area (um^2), default = 1
+maxParticleArea = 100, //particle analyzer rejects cells with larger area (um^2), default = 100
+step = 20, //slit width, thus segment length (default: 20 pixels)//14.2.2011
+wing = 30,//slit wing perpendicular to cell axis to either side (default = 30 pixels)
+minLengthTracer = 40,  //use tracer and segmented lines if major axis is larger (default: 40 pixels)//14.2.2011
+constrWindow = 0.3, //default = 0.3, ie single constriction is searched in central 30% of filament axis
+constrThreshold = 0.8, //default = 0.8, i.e. constriction is detected if it is <80% of mean diameter (1=disabled)
+
+maxCirc = 0.60, //default = 1.00, cells with higher circularity will be rejected by particle analyzer //Added by KV
+
+
+//conditions to accept/reject a cell:
+maxRelMaxDia = 1.4,//"Bump":    reject cell if maxDia/meanDia too large, default = 1.4
+maxDiaCV = 15,     //"NoTube":  reject cell if sides are not parallel enough (default = 15 % coeff of var.)
+minDia = 0.5,      //"MinDia":  reject cell if diameter is too small (in um), default = 0.6 um
+maxDia = 1.5,      //"MaxDia":  reject cell if diameter is too large (in um), default = 1.5 um
+maxKink = 40,      //"Kink":    reject cell if kink angle too large, default = 30 degrees
+maxLength = 200,   //"TooLong": ~max cell length in pixels (was: mapHeight)//*___*
+minArea = 40, //if scan window contains less, end of cell will be sensed  by extending current segment, default=40px
+
+//Fluorescence 
+extraWidth = 0.3, // added to dia for capturing fluor outside cell wall (default: 0.3 um)
+noiseToleranceSpots = newArray(0, 0, 0, 0), //thresholds for maximumFinder (spots) in ch1, ch2, ch3, ch4 -- use 0 for manual adjusting)
+centerPiece = 0.8, //for calculating volume of central 0.8 um of cell, (0=disabled, default = 0.8 um)
+
+firstManualItem = "Constr",
+scatterRange = 6, //default range for scatter plot
+plotColors = "red green magenta",//scatter plot 
+plotMarkers = "circles circles crosses",//for scatter plot
+
+myZoom = 3, //for browsing
+advancedResults = false, //if true includes: MinDiaCenter, MaxDia, VolCenter, FluorCenter, FluorPole, ConcCenter, ConcOffCenter, FCPlus
+twinsFlag = false,
+intFluorFlag = false, //if false, fluor profile contains mean values, otherwise integrated fluorescence 
+//----------------- end of user defined parameters ---------------------------
+mapHeight = maxLength,	
+selectedNames, //array for item names
+selectedChannels, //array for corresponding channels	
+axisPointsX, axisPointsY, //resulting axis vertices
+diaPointsX, diaPointsY, // diameter vertices
+diameter, axisLength, //of current cell in pixels
+relMaxDia, diaCV,
+pxSize, lastShowed, 
+Xc, Yc,//particle center in pixels
+fail = "",//string for failing
+firstTime = true,
+mapChannels = 0, 
+mapID, mapObserverID,
+mapColors = split("Magenta Green Cyan Yellow Grays"),
+currentThr =0,
+batchFlag = true,
+startTime,
+withMap=true, //*___*
+septaChannel = 2,
+GFPchannel = 3,
+singlePlotID,
+//dummy = installGraphAssistant(),
+;
+
+
+var imgNumber = 0; // Initialize the ImageNumber counter (Added by KV)
+
+
+// Marks filaments in those images that are linked but 
+// not marked yet. We first calculate a threshold, then analyze particles
+// and store their rois in the roi manager. Subsequently, each roi is 
+// isolated as mask (everything else black) and traced by a perpendicular slit window.
+// Markers are set along the axis, diameter (calculated from area and length) is marked
+
+macro "Mark Filaments"{
+	ojRequires("1.03g1");
+	firstTime = true;
+
+	if(ojNObjects() > 0){
+		kill = getBoolean("Kill " + ojNObjects() + " existing objects?");
+		if (kill){
+			ojDeleteAllObjects();
+		}
+	}
+	
+	if (ojNObjects() == 0){
+		ojDeleteColumn("_*"); //delete static columns age
+	}
+	
+	if (isOpen("Results")) {
+		selectWindow("Results");
+		run("Close");
+	}
+	startObjects = ojNObjects();
+	startTime = getTime;
+	run("Close All");
+	requires("1.48");
+	ojRequires("1.03a");
+	unmarkedImgs = 0;
+	if (ojNObjects() == 0 && withMap)
+		killMap();
+	for (img = 1; img <= ojNImages(); img++)
+		if (ojLastObject(img) < 0)
+			unmarkedImgs++;
+	if (unmarkedImgs == 0)
+		exit("No unmarked images found");
+	ojHideResults();
+	ojSetComposite(true);
+	unmarkedImgs = 0;
+	ojCloseObject();
+	imgCnt = 0;		
+
+
+	ojInitColumn("ImgNo"); // Added by KV
+
+
+	startImg = 1;//24.10.13 0:10
+	for (img = 1; img <= ojNImages(); img++){
+		if (ojLastObject(img) > 0)
+			startImg = img + 1;
+		}
+	if (startImg > ojNImages()) exit("No Images were marked");
+	
+	if (withMap){
+	if (ojNObjects() > 0)
+		showCompactedMap();
+	mapObserver("create");
+	}
+	if (ojColumnNumber("Thr") == 0){
+		ojInitColumn("Thr");
+		ojSetColumnProperty("Thr", "visible", 0);
+	}
+	if (ojColumnNumber("startX") == 0){
+		ojInitColumn("startX");
+		ojSetColumnProperty("startX", "visible", 0);
+		ojInitColumn("startY");
+		ojSetColumnProperty("startY", "visible", 0);
+	}
+	setBatchMode(batchFlag);//22.01.14 12:08
+	for (img = startImg; img <= ojNImages(); img++){
+
+		ojOrderObjectsInZ(img);
+		if (ojLastObject(img) < 0){//if unmarked
+			ojShowImage(img);
+			setBatchMode("show");//06.10.13 20:43
+			currentID = getImageID;
+			imgCnt++;
+			setOption("Show All",false);
+			getPixelSize(unit, pxSize, scaleY);
+			if (pxSize == 1) 
+				exit("Image is not scaled");
+			hyp = is("Composite");
+			if (hyp)
+				Stack.setDisplayMode("grayscale");
+			run("View 100%");
+			Stack.getDimensions(width, height, channels, slices, frames);
+			if (slices>1 && frames > 1) exit ("cannot process 5D imges");
+			for (slic = 1; slic <= slices; slic++){
+				for(fram = 1; fram <= frames; fram++){
+					Stack.setPosition(1, slic, fram); 
+					run("Select None");
+					ojSetTarget("frontimage");
+					close("ChannelSet");
+					run("Duplicate...", "title=ChannelSet duplicate frames=&fram slices=&slic");
+					channelSetID = getImageID;
+					resetMinAndMax;//6.1.2013 for updating
+					call("java.lang.System.gc");
+					markThisSlice(currentID, imgNumber);//for iterator    m a r k    t h i s    s l i c e
+
+
+					imgNumber += 1; // Added by KV to include image number in results
+
+
+					selectImage(currentID);
+				}
+			}
+			if (withMap){
+				selectImage(currentID);
+				getDiaProfiles(currentID, img);
+				for (chn = 2; chn <= channels; chn++)
+					getFluorProfiles(currentID, img, chn);
+				showRawMap();
+				setBatchMode("hide");
+				saveMap();
+			}
+		}//if (ojLastObject(img) < 0
+		ojShowImage(img);
+		if (img != ojNImages())
+			close;//22.01.14 12:12
+
+	}//for img = 1 to nImages
+	
+	if (isOpen("Results")) {
+		selectWindow("Results");
+		run("Close");
+	}
+	if (withMap)
+		showRawMap();
+	setBatchMode(false);
+	close("*Observer*");
+	ojSelectObject(0);
+	ojSetTool(0);	
+	if (withMap)
+		showCompactedMap();
+	minutes = (getTime - startTime)/60000; 
+	count = ojNObjects() - startObjects;
+	countPerMin = count/minutes;
+	showMessage("Speed", "" + count + " cells  in " + d2s(minutes,1) + " minutes \n(=" + d2s(countPerMin, 0) + " cells/min)");
+	ojShowImage(ojNImages());
+	setSlice(nSlices);
+	setSlice(1);//update
+	run("Select None");
+}
+
+//checks minimum diameter of each cell's centerpart and marks it as 
+//with yellow line object (only endpoints are visible)
+function addConstrictions(multipleConstr){
+	foundConstrictions = 0;
+	showRawMap();
+	if(!isMapClean())
+		exit("need to compact Map");
+	ojHideResults();
+	if (!multipleConstr){//single
+		ojDeleteColumn("nConstr");
+		ojInitColumn("Constr");
+		ojPutOperand("Constr", 1, 1);
+		ojPutAlgorithm("length"); 
+	}
+	else{
+		ojDeleteColumn("Constr");
+		ojInitColumn("nConstr");
+		ojPutOperand("Constr", 1, 1);
+		ojPutAlgorithm("count"); 	
+	}
+	ojSetColumnProperty("*Constr", "color", 0xcc8800);
+	flags = flagMarkedImages("Constr");
+		Array.getStatistics(flags, min, max, mean, std);
+	if (min > 0)
+		exit("All images contain already spots of type Constr");
+	firstTime = true;
+	//print("\\Clear");
+	for (img = 1; img <= ojNImages(); img++){
+		pxSize = ojGetVoxelSize(img, "x");
+		if (flags[img-1] == 0){	
+			ojSetTarget("image=" + img);
+			for (obj = ojFirstObject(img); obj <= ojLastObject(img); obj++){
+				ojSelectObject(obj);
+				ojSelectItem("Dia", 1);
+				diaPx = ojGetItemLength();//dia in pixels
+				dia = diaPx * pxSize;//dia in um
+				tolerance = (1-constrThreshold) * dia; 	
+				if (ojNItems("Constr") == 0){
+					stackIndex = ojZPos(1);					
+					ojSetTarget("stackindex=" + stackIndex);
+					showRawMap();
+					setSlice(1);				  //   a  c  b
+					diaArr = getCellProfile(obj); //eg 1553552
+					axisPx = diaArr.length;//axis in integer pixels
+					minPositions = Array.findMinima(diaArr, tolerance);//eg 063 
+					Array.sort(minPositions);//eg 036
+					len = minPositions.length;
+					for (kk=0; kk< len; kk++){
+						if (!multipleConstr && (minPositions[kk] * 2 < axisPx * (1-constrWindow) || minPositions[kk] * 2 > axisPx * (1+constrWindow) ) )
+							minPositions[kk] = -1;//invalid because single constriction is not in center
+						if (minPositions[kk] == 0  || minPositions[kk]== axisPx-1)//exclude border-minima
+								minPositions[kk] = -1;//invalid because minimum is at border
+						
+					}	
+										
+					constrPerCell = 0;
+					for (kk=0; kk< len; kk++){
+						minPos = minPositions[kk];
+						if (minPos != -1){
+							narrowDia = diaArr[minPos];
+							constrPerCell++;
+							foundConstrictions++;
+		
+						
+
+							ojvInitStack("2d");
+							ojSelectItem("Axis", 1);
+							axis = ojGetItemLength();
+							ojvPushItem();
+							relPos = minPos/axis;
+							x = ojvCalculate("partialpositionx " + relPos);
+							y = ojvCalculate("partialpositiony " + relPos);
+							xNear = ojvCalculate("partialpositionx " + (relPos + 0.001));
+							yNear = ojvCalculate("partialpositiony " + (relPos + 0.001));
+							localPhi = atan2(y-yNear, x-xNear) + PI/2;
+	
+							//a = floor(ojNPoints()/2);
+							//dx = ojXPos(a+1) -  ojXPos(a);
+							//dy = ojYPos(a+1) -  ojYPos(a);
+							//phi = atan2(dy, dx) + PI/2;
+							dx2 = 0.5 * narrowDia * cos(localPhi)/pxSize;
+							dy2 = 0.5 * narrowDia * sin(localPhi)/pxSize;
+		
+							ojSelectObject(obj);
+
+							ojOpenObject(obj);
+							ojSwitchToItem("Constr");
+							ojSetMarker(x-dx2, y-dy2);
+							ojSetMarker(x+dx2, y+dy2);
+							ojCloseObject();
+							if (!multipleConstr) break;
+						}
+					}
+				}
+			}
+		ojSetTarget("exit");
+		ojSelectObject(0);
+		}
+	}
+	ojSetTool(0);
+	showMessage("Constrictions added: " + foundConstrictions);
+}
+
+//returns variable length profile of obj from current Map channel 
+function getCellProfile(obj){
+	xx = obj;
+	start = getPixel(xx, 1);
+	len = getPixel(xx, 2);
+	if (start > 0 && len > 0){
+		arr = newArray(len);
+		for (yy = start; yy < start + len; yy++){//first and last element = 0
+			arr[yy - start] = getPixel(xx, yy);
+		}
+	}
+	else exit ("error cell# " + obj);
+	return arr;
+}
+
+//creates a 4-corner polygon roi from a line with with ww (precise)
+function lineToRect(xa, ya, xb, yb, ww){
+	dx = xb - xa;
+	dy = yb - ya;
+	len= sqrt(dx * dx + dy * dy);
+	ya1 = ya - dx * ww/len/2;
+	ya2 = ya + dx * ww/len/2;
+	xa1 = xa + dy * ww/len/2;
+	xa2 = xa - dy * ww/len/2;
+	yb1 = yb - dx * ww/len/2;
+	yb2 = yb + dx * ww/len/2;
+	xb1 = xb + dy * ww/len/2;
+	xb2 = xb - dy * ww/len/2;
+	makePolygon(xa1, ya1, xa2, ya2, xb2, yb2 , xb1, yb1);
+}
+
+// Marks a stack slice showing PHC image with bacteria
+function markThisSlice(origID, imgNumber){
+	run("Duplicate...", "title=HiddenSlice");	
+	run("Grays");
+	getParticleRois();//just to obtain rois
+	run("Set Scale...", "distance=0 known=0 pixel=1 unit=pixel");
+	roiManager("Show None");
+	nRois = roiManager("count");
+	
+	
+		failArr = newArray(nRois);
+		startXArr = newArray(nRois);
+		startYArr = newArray(nRois);
+		for (roi = 0; roi < nRois; roi++){
+			startXArr[roi] = getResult("XStart", roi);
+			startYArr[roi] = getResult("YStart", roi);
+		}
+	run("8-bit");
+	rename("HiddenMask");
+	run("Select None");
+	changeValues(0, 255, 0);
+	setOption("Show All", false);
+	run("Set Measurements...", "area mean centroid center fit feret's");
+	//failArr = newArray(nRois);
+	nFails = 0;
+	for (roi = 0; roi < nRois; roi++){
+		fail = "";
+		sampleAndMarkRoi(roi, startXArr, startYArr, imgNumber);
+		if (fail != "")
+			failArr[nFails++] = fail+" " + Xc + " " + Yc;
+		showStatus("Image "+ imgCnt + " of " + ojNImages() +";  #Objects= " + ojNObjects());
+	}
+	roiManager("Reset");
+	close("Hidden*");
+	selectImage(origID);
+	run("Select None");
+	if (nSlices > 1)
+		Stack.setChannel(1);
+	Overlay.remove;
+	setColor("orange");
+	setFont("SanSerif", 16);
+	
+	for (jj = 0; jj < nFails; jj++){
+		parts = split(failArr[jj], " ");
+		failx = parseFloat(parts[1]);
+		faily = parseFloat(parts[2]);
+		Overlay.drawString(parts[0], failx-10, faily-10);		
+	}
+	resetMinAndMax();
+	Overlay.show();
+
+	msg = "" + nFails + " cell(s) were rejected.";
+	ojSetTool(-2);//pistol
+	run("Set... ", "zoom=100");
+	ojSetTarget("exit");	
+	selectImage(origID);
+	inspect(msg, firstTime);
+	//startTime = getTime;
+	ojSetTool(0);
+	firstTime = false;
+
+	if (!is("Caps Lock Set"))
+		wait(200);
+	run("Remove Overlay");
+} 
+
+
+//Samples one roi of the Roimanager's list on unscaled mask
+//Long objects:  slitscanning is used
+//Short objects: EllipseToRod is used
+//In both cases, results are put into arrays for axis and for diameter.
+
+
+function sampleAndMarkRoi(roi, startXArr, startYArr, imgNumber){
+	fail = "";
+	passed = true;
+	roiManager("Select", roi);//also selects the slice!!
+	changeValues(0, 1e9, 255);//white roi on black backgnd
+	List.setMeasurements;	
+	Xc = List.getValue("X");
+	Yc = List.getValue("Y");
+	area = List.getValue("Area");
+	feretR = 0.5 * List.getValue("Feret");
+	phi = List.getValue("Angle");
+	major = List.getValue("Major");
+	minor = List.getValue("Minor");
+	
+	
+	slitScan = major > minLengthTracer;
+
+	if (slitScan) 
+		passed = doSlitScan(Xc, Yc, feretR, phi, area);//checks diaIsUniform and diaWithinRange
+	else
+		passed = roiToRod();//checks diaWithinRange
+	  
+	if (passed){
+		calcTubeDeviation();
+		if (relMaxDia > maxRelMaxDia){
+			passed = false;
+			fail = "Bump";
+		}
+		
+	}
+	if (axisLength > maxLength-8){
+		passed = false;
+		fail = "TooLong";
+	}
+	
+	if (passed && diaCV > maxDiaCV){
+			passed = false;
+			fail = "NoTube";
+		
+	}
+	if (passed){
+		//ojShowImage(img);		
+		straightenEnds();
+		markItem("Axis", axisPointsX, axisPointsY); 
+		markItem("Dia", diaPointsX, diaPointsY);
+		ojCloseObject();
+		obj = ojNewestObject();
+		ojSetResult("Thr", obj, currentThr);
+		ojSetResult("StartX", obj, startXArr[roi]);
+		ojSetResult("StartY", obj, startYArr[roi]);
+		ojSetResult("ImgNo", obj, imgNumber); // KV Added new line: Now this object also contains the ImageNumber in results
+	}
+	roiManager("Select", roi);
+	run("To Bounding Box");
+	changeValues(0, 1e9, 0);
+}
+
+//return spot number in current stack
+function itemCount(img, spotType){
+		spots = 0;
+		for (obj = ojFirstObject(img); obj <= ojLastObject(img); obj++){
+			ojSelectObject(obj);
+			spots = spots + ojNItems(whichSpot);
+		}
+	return spots;
+}
+
+
+
+
+
+
+ 
+//inits arrays selectedNames and selectedChannels, containing matching item types and home channels
+function defineBindings(pattern){
+	allNames = split(ojGetItemNames());
+	len = allNames.length;
+	selectedNames = newArray(len);
+	selectedChannels = newArray(len);
+	chn = 2;
+	count = 0;
+	for (jj = 0; jj < len; jj++){
+		name = allNames[jj];
+		if (endsWith(name, "Spot"))
+			thisChannel = chn++;
+		else
+			thisChannel = 1;//all others to chn 1
+		if (ojMatches(name, pattern)){
+			selectedNames[count] = name;
+			selectedChannels[count++] = thisChannel;
+		
+		}
+	}
+	selectedNames =  Array.trim(selectedNames, count);
+	selectedChannels =  Array.trim(selectedChannels, count);
+}
+
+ 
+//returns an array of flags that shows that image contains at least 1 whichType
+function flagMarkedImages(whichType){
+	count = ojNImages();
+	flags = newArray(count);
+	for (img = 1; img <= count; img++){
+		for (obj = ojFirstObject(img); obj <= ojLastObject(img); obj++){
+			ojSelectObject(obj);
+			if (ojNItems(whichType) > 0){
+				flags[img-1] = true;
+				obj = 1e9;
+			}
+		}	
+	}
+	return flags;
+}
+
+
+//removes spot types as specified in dialog
+function removeItems(whichType){
+	ojHideResults();
+	for (obj = ojNObjects(); obj > 0;  obj--){
+		ojSelectObject(obj);
+		for (itm = ojNItems(whichType); itm > 0; itm--)
+			ojDeleteItem(whichType, itm);
+	}
+	ojSelectObject(0);
+	if (whichType == "Constr")
+		ojDeleteColumn("Constr");
+}
+
+// dialog to choose a column
+function selectColumnTitle(){
+	nCols = ojNColumns();
+	colTitles = newArray(nCols);
+	for (jj = 0; jj < nCols; jj++){
+		title = ojGetColumnTitle(jj+1);
+		colTitles[jj] = title;
+	}
+	Dialog.create("Choose Column for sorting:");
+	Dialog.addChoice("Column to sort:", colTitles);
+	Dialog.show();
+	return Dialog.getChoice();
+}
+
+
+//returns array holding qualified rank positions of a  column
+//example: if cell 5 has smallest value and is qualified, arr[0] = 5
+function rankedPositions(colTitle){
+	len = ojNObjects();
+	colArray = newArray(len);
+	for (obj = 1; obj <= len; obj++){
+		colArray[obj - 1] = ojResult(colTitle, obj);
+	}
+	arr = Array.rankPositions(colArray);
+	ptr = 0;
+	for (jj = 0; jj < len; jj++){
+		ix = arr[jj];
+		if (ojQualified(ix + 1) && !isNaN(colArray[ix]))
+			arr[ptr++] = ix;
+	
+	}
+	//count = ojGetStatistics(colTitle, "count");
+	arr = Array.trim(arr, ptr);//15.01.14 22:54
+	return arr; //starting with index of smallest value, zero-based, NaNs not included
+}
+
+
+
+
+//converts irregular roi into best-fitting rod and
+//stores results in global arrays axisPointsX, axisPointsY,
+//diaPointsX, diaPointsY
+function roiToRod(){
+	arr = ellipseToRod(major, minor);
+	len = arr[0];
+	dia = arr[1];
+	diameter = dia;//in pixels, store globally
+	axisLength = len;//sin pixels, tore globally
+	if (dia*pxSize < minDia){
+		passed = false;
+		fail = "MinDia";
+		return passed;
+	}
+	if (dia*pxSize > maxDia){
+		passed = false;
+		fail = "MaxDia";
+		return passed;
+	}
+	if (passed){						
+		k57 = 180/PI;
+		phi2 = phi/k57;
+		x1 = Xc + 0.5*len*cos(phi2);
+		y1 = Yc - 0.5*len*sin(phi2);
+		x2 = Xc - 0.5*len*cos(phi2);
+		y2 = Yc + 0.5*len*sin(phi2);
+		axisPointsX = newArray(x1, x2);
+		axisPointsY = newArray(y1, y2);
+		
+		phi2 += PI/2;
+		x1 = Xc + 0.5*dia*cos(phi2);
+		x2 = Xc - 0.5*dia*cos(phi2);
+		y1 = Yc - 0.5*dia*sin(phi2);
+		y2 = Yc + 0.5*dia*sin(phi2);
+		diaPointsX = newArray(x1, x2);
+		diaPointsY = newArray(y1, y2);	
+	}
+	return passed;
+}
+
+
+//Moves a perpendicular slit window along filament, and returns a segmented line 
+//in global arrays axisPointsX, axisPointsY, 
+//and a straight line in global arrays diaPointsX, diaPointsY.
+//Scanning is started in filament's center and carried out twice (to either end). 
+function doSlitScan(xc, yc, feretR, angle, area){
+	phi0 = PI + angle/180*PI;
+	dx =  cos(phi0 + PI/2) * feretR;
+	dy =  sin(phi0 + PI/2) * feretR;
+
+	lineToRect(xc - dx, yc + dy, xc + dx, yc - dy, step);
+	startCenter = setMidPoint();//our starting midpoint	 
+	if (isNaN(startCenter[0])){
+		passed = false;
+		return passed;
+	}	
+	for (loop = 1; loop <= 2; loop++){
+		xPoints = newArray(1000);
+		yPoints = newArray(1000);
+		xc1 = startCenter[0];//previous
+		yc1 = startCenter[1];
+		count = 0;
+		phi = phi0;
+		if (loop == 1){
+			phi += PI;
+			xPoints[0] = xc1;
+			yPoints[0] = yc1;
+			count++;
+		}
+		done = false;
+		while (!done){
+			dx = cos(phi) * step;
+			dy = sin(phi) * step;
+			xc2 = xc1 + dx;//proposed
+			yc2 = yc1 - dy;
+			dx =  cos(phi + PI/2) * wing;
+			dy =  sin(phi + PI/2) * wing;
+			xa = xc2 - dx;
+			ya = yc2 + dy;
+			xb = xc2 + dx;
+			yb = yc2 - dy;
+			lineToRect(xa, ya, xb, yb, step);
+
+			
+			center = setMidPoint();//our starting midpoint
+			if (fail != "")//7.2.2013
+				return false;
+			done = isNaN(center[0]);
+			xc3 = center[0];//corrected
+			yc3 = center[1];
+			if (!done){
+				xPoints[count] = xc3;
+				yPoints[count] = yc3;
+				count++;
+				phi = atan2(-yc3 + yc1, xc3 - xc1);
+				xc1 = xc3;
+				yc1 = yc3;
+			}
+		}
+		if (count==0){
+			//waitForUser("Count == 0");
+			fail = "Strange";
+			return false;
+		}
+		dx = cos(phi) * step * 2;//find last point
+		dy = sin(phi) * step * 2;
+		run("Line Width...", "line=" + 4);
+		makeLine(xc1, yc1, xc1 + dx, yc1 - dy);
+		profile = getProfile();
+		len = profile.length;	
+		dxpart = 0;//7.2.2013
+		dypart = 0;
+		for (jj = 0; jj < len; jj++){
+			val = profile[jj]/255;
+			if(val < 0.9){
+				dxpart = dx * (jj - val)/len;
+				dypart = dy * (jj - val)/len;
+				jj = 1e9;//exit loop
+			}
+		}
+		lastX = xc1+ dxpart;
+		lastY = yc1 - dypart;
+		if (xPoints[count - 1] != lastX || yPoints[count - 1] != lastY){
+			xPoints[count] = xc1+ dxpart;
+			yPoints[count] = yc1 - dypart;
+			count++;
+		}
+
+		if (loop == 1){
+			leftXPoints = Array.trim(xPoints, count);
+			leftYPoints = Array.trim(yPoints, count);
+		}
+		if (loop == 2){
+			rightXPoints = Array.trim(xPoints, count);
+			rightYPoints = Array.trim(yPoints, count);
+		}
+	}
+	Array.reverse(leftXPoints);
+	Array.reverse(leftYPoints);
+	axisPointsX = Array.concat(leftXPoints, rightXPoints);
+	axisPointsY = Array.concat(leftYPoints, rightYPoints);	
+	
+	axisLength = 0;	//global
+	nPts = axisPointsX.length;	
+	for (mm = 1; mm < nPts; mm++){
+		dx = axisPointsX[mm]-axisPointsX[mm-1];
+		dy = axisPointsY[mm]-axisPointsY[mm-1];
+		axisLength += sqrt(dx * dx + dy * dy);
+	}
+	//quadratic equation from: area=(len-dia)*dia + dia*dia*PI/4
+	p = -1/(1-PI/4) * axisLength;
+	q = 1/(1-PI/4) * area;
+	D = p*p/4 - q;
+	if (D>0)
+		dia = -p/2 -sqrt(D);
+	else
+		dia = 0;
+	diameter = dia;//store globally
+	
+	
+	
+	diaPos = round(nPts/3);
+	dx = axisPointsX[diaPos + 1] - axisPointsX[diaPos];
+	dy = axisPointsY[diaPos + 1] - axisPointsY[diaPos];
+	segLen = sqrt(dx * dx + dy * dy);
+	dy2 = dx * dia/2 /segLen;
+	dx2 = dy * dia/2 /segLen;
+	
+	x1 = axisPointsX[diaPos] -dx2;
+	x2 = axisPointsX[diaPos] +dx2;
+	y1 = axisPointsY[diaPos] +dy2;
+	y2 = axisPointsY[diaPos] -dy2;
+	diaPointsX = newArray(x1, x2);
+	diaPointsY = newArray(y1, y2);	
+		
+	if (dia*pxSize < minDia){
+		passed = false;
+		fail = "MinDia";
+		return passed;
+	}
+	if (dia*pxSize > maxDia){
+		passed = false;
+		fail = "MaxDia";
+		return passed;
+	}
+
+	x = axisPointsX;//check kink
+	y = axisPointsY;
+	for (i=1; i<x.length-1; i++) {
+		dotprod = (x[i+1]-x[i])*(x[i-1]-x[i])+(y[i+1]-y[i])*(y[i-1]-y[i]);
+ 		crossprod = (x[i+1]-x[i])*(y[i-1]-y[i])-(y[i+1]-y[i])*(x[i-1]-x[i]);
+ 		angle = (180/PI)*atan2(crossprod, dotprod);
+		if (abs(angle) < 180-maxKink){
+			passed = false;
+			fail = "Kink";
+			return passed;
+		}
+	}
+	return passed;
+}
+
+//calculate deviation from ideal tube:
+//superimpose coli mask with wide line selection (width = 2*diameter)
+//get profile and strip caps (0.5*dia) on either side 
+//calc relMaxDia = rel. dia of thickest part of coli, (ideal tube: 1.0; typically 1.05..2)
+//calc diaCV in percent; (= 0% in ideal tube)
+function calcTubeDeviation(){
+	lw = round(2*diameter);
+	run("Line Width...", "line=&lw");
+	makeSelection("polyline", axisPointsX, axisPointsY);
+	profile = getProfile();
+	cap = floor(diameter/2);
+	profile = Array.trim(profile, lengthOf(profile) - cap);
+	Array.invert(profile);
+	profile = Array.trim(profile, lengthOf(profile) - cap);
+	Array.getStatistics(profile, prMin, prMax, prMean, prStdDev);
+	
+	relMaxDia = prMax/ prMean;//global
+	diaCV = prStdDev/prMean*100;//global
+	run("Line Width...", "line=1");
+}
+
+//returns length of nn-th segment of a segmented line (1-based)
+function getSegment(pointsX, pointsY, nn){
+	if (lengthOf(pointsX) <= nn || nn < 1)
+		exit("segment error");
+	seg = sqrt(pow(pointsX[nn] - pointsX[nn-1], 2) +pow(pointsY[nn] - pointsY[nn-1], 2));
+	return seg;
+}
+
+//straightens  axis if begin or end segment is <= 2 pixels
+function straightenEnds(){
+	two = 2;
+	nPoints = lengthOf(axisPointsX);
+	if (nPoints < 4)
+		return;
+	
+	//disable second or second to last point if final segment is <= 2pixel
+	last = nPoints-1;
+	firstSeg = getSegment(axisPointsX, axisPointsY, 1);
+	lastSeg = getSegment(axisPointsX, axisPointsY, last-1);
+
+	if (firstSeg<=two)
+		axisPointsX[1] = -99;
+	if (lastSeg<=two && last > 3 )
+		axisPointsX[last-1] = -99;
+	kk = 0;
+	for (jj = 0; jj < nPoints; jj++)
+		if (axisPointsX[jj] > 0){
+			axisPointsX[kk] = axisPointsX[jj];
+			axisPointsY[kk] = axisPointsY[jj];
+			kk++;
+		}
+	if (kk < nPoints){
+		axisPointsX = Array.trim(axisPointsX, kk );	
+		axisPointsY = Array.trim(axisPointsY, kk);	
+	}
+}
+
+
+// getParticleRois Does standard particle analysis, output goes to RoiManager
+function getParticleRois(){
+	run("Select None");
+	currentThr = calcThreshold();
+	setThreshold(0, currentThr);
+	run("Set Measurements...", "Area");//later...
+	run("Clear Results");
+	roiManager("Reset");
+	run("Analyze Particles...", "size="+minParticleArea+"-"+maxParticleArea+" circularity=0.00-"+maxCirc+" show=Nothing exclude clear include record add");
+	resetThreshold;
+}
+
+// ____ begin Coli
+
+ 
+// Adding spots is done by detecting and marking maxima inside cell boundary 
+macro "Spots and Constrictions ..."{
+	defineBindings("*");
+
+	ojHideResults();
+	if (ojNImages() == 0) exit("No images are linked");	
+	Dialog.create("Constrictions and Spots");
+	str = "";
+	for (jj = 0; jj < selectedNames.length; jj++){
+		name= selectedNames[jj];
+		if (startsWith(name, "Constr") || endsWith(name, "Spot")){
+			if (name == "Constr"){
+			 	str += "Add Single Constr's to Chn " + selectedChannels[jj] +"|";
+			 	str += "Add Multiple Constr's to Chn " + selectedChannels[jj] +"|";
+			 }
+			 else
+			 	str += "Add '" + name + "'s to channel " + selectedChannels[jj] +"|";
+			 str += "Delete '" + name + "'s|";
+			 str += "-|";
+		}
+	}
+	choiceArray = split(str, "|");
+	Dialog.addChoice("Add/Delete:", choiceArray);
+
+	Dialog.show();
+	itemStr = Dialog.getChoice();
+	if (startsWith(itemStr, "Add Single"))
+		addConstrictions(false);
+	else if (startsWith(itemStr, "Add Multiple"))
+		addConstrictions(true);
+	else if (startsWith(itemStr, "Add")){
+		arr = split(itemStr, "'");		
+		itemName = arr[1];
+		addSpots(itemName);
+	}
+	if (startsWith(itemStr, "Delete")){
+		arr = split(itemStr, "'");		
+		itemName = arr[1];
+		removeItems(itemName);
+	}	
+}
+
+
+function addSpots(whichSpot){
+	for (jj = 0; jj < selectedNames.length; jj++){
+		if (selectedNames[jj] == whichSpot)
+			spotChannel = selectedChannels[jj];
+	}
+	flags = flagMarkedImages(whichSpot);
+	Array.getStatistics(flags, min, max, mean, std);
+	if (min > 0)
+		exit("All images contain already spots of type "+ whichSpot);
+
+		
+	additionalSpots = 0;
+	ojHideResults();
+	firstTime = true;
+	theTolerance = noiseToleranceSpots[spotChannel - 1];
+	for (img = 1; img <= ojNImages(); img++){
+		if (flags[img-1] == 0){
+			if (firstTime && (theTolerance == 0)){
+				ojShowImage(img);
+				setLocation(80, 80);
+				getDimensions(dummy, dummy, channels, dummy, dummy);
+				if(spotChannel > channels)
+					exit("channel " + spotChannel + " does not exist"); 
+				Stack.setChannel(spotChannel);
+				guessed = round(guessNoiseLevel(0.5));
+				newTolerance = guessed;
+				range = newTolerance/0.5;
+				oldTolerance = 0;
+				while (newTolerance != oldTolerance){
+					run("Find Maxima...", "noise=" + newTolerance + " output=[Point Selection]");
+					oldTolerance = newTolerance;
+					Dialog.create("Noise Tolerance for Maximum Finder:");
+					Dialog.addSlider("Tolerance:", 1,  range,  newTolerance);
+					Dialog.addMessage("Initial tolerance guess = " + guessed +"\nDialog will re-appear as long as value is changed");
+					Dialog.show();
+					newTolerance = Dialog.getNumber();
+				}
+				theTolerance = newTolerance;
+			}
+			prevZ = 0;
+			ok = false;
+			while (nImages > 1) 
+				close;
+			ojShowImage(img);
+			channels = ojGetImageValue(img, "channels");
+			if(channels < spotChannel) exit("non-existing channel: " + spotChannel);
+			markedSlice = 0;
+			for (obj = ojFirstObject(img); obj <= ojLastObject(img); obj++){
+			
+				ojSelectObject(obj);
+				z = ojZPos(1) + spotChannel - 1;//assume phc channel = 1
+				if (prevZ != z){ 
+					if (markedSlice > 0){
+						setSlice(markedSlice);
+						ojSetTarget("exit");
+						run("Select None");
+						//inspect("Detecting Fluor. Spots", firstTime);
+						markedSlice = 0;
+						firstTime = false;
+					}	
+				}
+				setSlice(z);
+				ojSetTarget("frontimage");
+				if (ojNItems("Dia") == 0)
+					exit("'Dia' missing in cell " + obj);
+				ojSelectItem("Dia", 1);
+				dia = ojGetItemLength();
+				lw = round( dia + 8);
+				run("Line Width...", "line=&lw");
+				ojSelectObject(obj);
+				ojItemToRoi();
+				run("Line to Area");
+				Stack.getPosition(channel, slice, frame);
+	
+				run("Find Maxima...", "noise=" + theTolerance+ " output=[Point Selection]");
+
+				if (selectionType == 10){
+					ojOpenObject(obj);
+					getSelectionCoordinates(xx, yy);
+					for (spot = 0; spot < lengthOf(xx); spot++){
+						x = xx[spot] + 0.5;
+						y = yy[spot] + 0.5;
+						ojSwitchToItem(whichSpot);
+						ojSetMarker(x, y);
+						additionalSpots++;
+					}
+					ojCloseObject();
+					run("Select None");
+					markedSlice = z;
+				}
+					
+				prevZ = z;
+			}
+			ojSetTarget("exit");
+
+		}
+	}
+	if (nImages > 0) run("Select None");
+	ojSetTool(0);
+	showMessage("Number of additonal "+ whichSpot +"s: "+ additionalSpots);
+	ojShowImage(1);
+}
+
+function guessNoiseLevel(fraction){
+	getRawStatistics(nPixels, mean, min, max);
+	run("Select None");
+	return (max - mean) * fraction;
+}
+
+macro "-"{}
+
+
+
+
+
+//Creates dia versus axis profile; expects white cell on black backgnd,
+//and uses globals diameter, axislength,  axisPointsX, axisPointsY 
+
+//assumes that orig image and slice is in front
+//creates via Thr a mask of each phc frame and set particles to 1 and backgnd to 0
+//autooutlines particle, sets it to 255 and creates a profile
+
+
+
+
+function createAgeColumn(fromTitle, toTitle){
+	nCells = ojNObjects();
+	ojInitColumn(toTitle);
+	if (nCells < 2) return;
+	axes = newArray(nCells);
+	for (obj = 1; obj <= nCells; obj++)
+		axes[obj-1] = ojResult(fromTitle, obj);
+	rankPosArr = Array.rankPositions(axes);
+	ranks = Array.rankPositions(rankPosArr);
+	Td = 100;
+	for (obj = 1; obj <= nCells; obj++){
+		relRank = ranks[obj-1] / (nCells - 1);
+		age = Td * log(1 - 0.5 * relRank) / log(0.5);
+		ojSetResult(toTitle, obj, age);
+	}
+}
+
+function getDiaProfiles(srcId, img){
+	selectImage(srcId);
+	setBatchMode("hide");
+	if (ojColumnNumber("Thr") == 0){
+		ojInitColumn("Thr");
+		ojSetColumnProperty("Thr", "visible", 0);
+	}
+	if (ojColumnNumber("startX") == 0){
+		ojInitColumn("startX");
+		ojSetColumnProperty("startX", "visible", 0);
+		ojInitColumn("startY");
+		ojSetColumnProperty("startY", "visible", 0);
+	}
+	
+	currentSlc = 0;
+	pxSize = ojGetVoxelSize(img, "x");
+	width30 = round(maxDia * 1.5 / pxSize);//approx 30 px  //06.10.13 22:16	
+	run("Line Width...", "line=&width30");
+	for (obj = ojFirstObject(img); obj <= ojLastObject(img); obj++){
+		ojSelectObject(obj);
+		if (ojZPos(1) != currentSlc){
+			close("Hidden*");
+			selectImage(srcId);
+			currentSlc = ojZPos(1);
+			if (currentSlc > nSlices)
+				exit("Slice Error");
+			setSlice(currentSlc);
+			getDimensions(dummy, dummy, channels, dummy, dummy);
+			if (channels > 1)
+				Stack.setDisplayMode("color");
+			run("Duplicate...", "title=HiddenSlice");	
+			run("Grays");
+			run("Set Scale...", "distance=0 known=0 pixel=1 unit=pixel");
+			currentThr = ojResult("Thr", obj);
+			if (isNaN(currentThr))
+				currentThr = calcThreshold();			
+			setThreshold(0, currentThr);
+			run("Convert to Mask");
+			changeValues(1, 255, 1);
+			run("3-3-2 RGB");
+			maskID = getImageID;
+		}
+		ojSetResult("Thr", obj, currentThr);
+		selectImage(maskID);
+		ojSelectItem("Dia", 1);
+		startX = ojResult("startX", obj);
+		startY = ojResult("startY", obj);
+		if (!isNaN(startX + startY))	
+			doWand(startX, startY);
+		else{//will be obsolete
+			doWand((ojXPos(1) + ojXPos(2))/2, (ojYPos(1) + ojYPos(2))/2 );//center of Dia line
+	
+			if(twinsFlag){
+				ax = ojXPos(1);
+				ay = ojYPos(1);
+				bx = ojXPos(ojNPoints());
+				by = ojYPos(ojNPoints());
+				if (ax < bx){
+					cx = ax - 3;
+					cy = ay + 1;
+				}
+				else{
+					cx = bx - 3;
+					cy = by - 1;
+				}
+				doWand(cx, cy);//17.3.2013
+			}
+		}
+			
+			
+		getSelectionBounds(left, top, ww, hh);
+		changeValues(1,1, 255);
+		ojSelectItem("Axis", 1);
+		ojItemToRoi();
+		diaProfile= getProfile;
+		makeRectangle(left, top, ww, hh);
+		changeValues(255, 255, 1);
+		showRawMap();	
+		setSlice(1);
+		ww = getWidth;
+		hh = getHeight;
+		if (getPixel(getWidth-1, 0) != 0){//expand if necessary
+			run("Canvas Size...", "width=" + (ww + 100) + " height=" + hh + " position=Top-Left zero");
+			makeRectangle(0, 8, ww, hh - 8);
+			run("Enhance Contrast", "saturated=0.35");
+			run("Select None");
+		}
+		slot = obj;
+		while(getPixel(slot, 0) !=0)//find empty slot
+			slot++;
+		len = diaProfile.length;
+		start = round((mapHeight - len)/2);
+
+		for (jj = 0; jj < len; jj++){
+			val = diaProfile[jj] * pxSize * width30/255;// in um
+			setPixel(slot, start + jj, val);
+		}
+		setPixel(slot, 0, ojObjectID(obj));
+		setPixel(slot, 1, start);
+		setPixel(slot, 2, len);	
+		
+		
+		if (obj%20 == 5){
+			mapObserver("update");
+		}
+		selectImage(srcId);		
+	}
+	selectImage(srcId);
+	setBatchMode("show");
+
+ 	saveMap();
+}
+
+//Creates fluor versus axis profile; expects white cell on black backgnd,
+//and uses globals diameter, axislength,  axisPointsX, axisPointsY 
+function getFluorProfiles(thisID, img, chn){
+
+	selectImage(thisID);
+	setBatchMode("hide");
+	pxSize = ojGetVoxelSize(img, "x");
+	Stack.getDimensions(width, height, channels, slices, frames);
+	prevIndex = 0;
+	roiManager("Reset");
+
+ 	for (objI = ojFirstObject(img); objI <= ojLastObject(img); objI++){
+		ojSelectObject(objI);
+ 		stackIndex= ojZPos(1) + chn - 1;
+ 		if (prevIndex != stackIndex){//now go twice through objects in this slice
+			roiManager("Reset");
+  			setSlice(stackIndex);
+			obj = objI;
+			do{
+				ojSelectObject(obj);
+				ojSelectItem("Dia", 1);
+				lWidth = round(ojGetItemLength() + extraWidth/pxSize);
+				run("Line Width...", "line=&lWidth");
+				ojSelectObject(obj);
+				ojItemToRoi();
+				roiManager("Add");
+				flProfile= getProfile;
+				if (intFluorFlag){
+					factor = lWidth/100;
+					for (kk = 0; kk <flProfile.length; kk++){
+						flProfile[kk] *= factor;
+					}
+				}
+				appendProfile(obj, chn, flProfile);
+				selectImage(thisID);			
+				nextSlice = 0;
+				if (obj < ojLastObject(img)){
+					ojSelectObject(obj+1);
+					nextSlice = ojZPos(1) + chn - 1;
+				}
+				obj++;
+				if (obj%20 == 5 && withMap){
+					mapObserver("update");
+				}
+			} while (nextSlice == stackIndex);
+ 			selectImage(thisID);
+ 			//print("A-", getTitle);		
+			observeImg();
+ 			//print("B-", getTitle);		
+			selectImage(thisID);		
+ 			prevIndex = stackIndex;
+ 		}
+ 	}
+ 	selectImage(thisID);
+	setBatchMode("show");//16.01.14 1:23
+ 	roiManager("Reset");
+ 	run("Select None");
+ 	saveMap();
+}
+
+//puts front image (single slice) into observer image,
+//adjusting canvas size, bit depth, display range, LUT,
+//and displays rois as overlay. i
+
+
+function observeImg(){
+	srcID = getImageID;
+	close("observer");
+	selectImage(srcID); //why?? ;
+	run("Select None");
+	run("Duplicate...", "title=observer");
+	setBatchMode("show");
+	run("From ROI Manager");
+	selectImage(srcID);
+}
+
+function appendProfile(obj, chn, flProfile){
+	showRawMap();
+	len = flProfile.length;
+	start = round((mapHeight - len)/2);
+	setSlice(chn);
+	slot = obj;
+
+	for (jj = 0; jj < len; jj++){
+		val = flProfile[jj];
+		setPixel(slot, start + jj, val);
+	}
+	setPixel(slot, 0, ojObjectID(obj));
+	setPixel(slot, 1, start);
+	setPixel(slot, 2, len);	
+}
+
+
+//with Map in front, copies contents to observer window
+function mapObserver(what){
+	id = 0;
+	if (nImages > 0)
+		id = getImageID;
+	if(what == "create"){	
+		if (!isOpen(mapObserverID)){
+			newImage("Map-Observer", "RGB Color", 100, mapHeight, 1);
+			mapObserverID = getImageID;
+			setLocation(20, screenHeight - mapHeight);
+		}
+	}
+
+	if(what == "update"){
+		selectImage(mapID);
+		ww = getWidth;
+		hh = getHeight-8;
+		makeRectangle(0, 8, ww, hh);
+		run("Enhance Contrast", "saturated=0.35");
+		run("Copy");
+		selectImage(mapObserverID);
+		if (getWidth != ww)
+			run("Canvas Size...", "width=&ww height=&hh");//incl auto zoom
+		run("Paste");
+		run("Select None");
+	}	
+	if (id !=0)
+		selectImage(id);	
+}
+
+
+
+//Necessary if Map inside the project is not found
+macro "Rebuild Map"{
+	ojHideResults();
+	mapObserver("create");
+	killMap();
+
+	setBatchMode(batchFlag);
+	showRawMap();
+	setBatchMode("hide");
+
+	for (img = 1; img <= ojNImages(); img++){
+		close(ojGetImageName(img));
+	}
+
+	for (img = 1; img <= ojNImages(); img++){
+		ojShowImage(img);
+		setBatchMode("hide");
+		currentID = getImageID;		
+		getDimensions(width, height, channels, slices, frames);
+		time = getTime;//15.01.14 20:22
+		
+	
+		selectImage(currentID);
+		getDiaProfiles(currentID, img);
+		for (chn = 2; chn <= channels; chn++)
+			getFluorProfiles(currentID, img, chn);
+		ojSelectObject(0);
+		saveMap();
+		close(ojGetImageName(img));
+	}
+	setBatchMode(false);
+	setSlice(1);
+	showCompactedMap();
+	close("*Observer*");
+}
+
+
+
+
+//--Map: Compact and Show Map
+//compacted map does not contain any information of deleted cells
+macro "Compact and Show Map"{
+	showCompactedMap();
+	zoom = getZoom();
+	if (getWidth * zoom < 200 && zoom < 1)
+		run("View 100%");
+	
+
+}
+
+
+//--Map: isMapClean
+//with map in front, checks cell ids in slice 1
+function isMapClean(){
+	setZCoordinate(0);
+	for (x=1; x< getWidth; x++){
+		id = getPixel(x, 0);
+		index = ojIdToIndex(id);
+			if (index != x )
+				return false;
+	}
+	return true;
+}
+
+
+//--Map: cleanMap
+function cleanMap(){
+
+//with map in front, makes sure that all cells are valid and in ascending order
+
+
+
+}
+
+
+
+function killMap(){
+	name = "" + ojGetProjectName() + "-Map.tif";
+	path = "" + ojGetProjectPath() + name;
+	b = File.delete(path);
+	close(name);
+}
+
+function saveMap(){
+	name = "" + ojGetProjectName() + "-Map.tif";
+	path = "" + ojGetProjectPath() + name;
+	mapOpen = (isOpen(mapID) && ojNObjects() > 0);
+	if (mapOpen){
+		selectImage(mapID);
+		name = "" + ojGetProjectName() + "-Map.tif";
+		path = "" + ojGetProjectPath() + name;
+		save(path);
+		wait(99);//Jolanda retard
+	}
+}
+
+function closeMap(){
+	name = "" + ojGetProjectName() + "-Map.tif";
+	close(name);
+}
+//--Map: showRawMap
+function showRawMap(){
+	name = "" + ojGetProjectName() + "-Map.tif";
+	path = "" + ojGetProjectPath() + name;
+	if (ojNObjects() == 0){
+		b = File.delete(path);
+	}
+	mapOpen = (isOpen(mapID) && ojNObjects() > 0);
+	if (!mapOpen) {
+		close(name);
+		if (File.exists(path) && ojNObjects() > 0){
+			open(path);
+			Stack.getDimensions(width, height, mapChannels, slices, frames);
+			if (height != mapHeight){
+				close;
+				exit("MapHeight has changed - please remove: \n \n     " + name + "\n \nfrom project folder");
+			}
+		}
+		else {
+			mapChannels= ojGetImageValue(1, "channels");
+			newImage(name, "32-bit Black", 100, mapHeight, mapChannels, 1, 1);//start with width = 100
+			mapID = getImageID;
+			for (chn = 1; chn <= mapChannels; chn++){
+				setSlice(chn);
+				run(mapColors[chn-1]);
+				if (chn == 1)
+					setMetadata("label", "Diameter");
+				else
+					setMetadata("label", "fluorCh" + chn);
+			}
+			saveMap();
+		}
+		mapID = getImageID;
+	}
+	else
+		selectImage(mapID);	
+}
+
+//--Map: showCompactedMap
+//remove unused slots (of killed cells) and re-save the map
+function 	showCompactedMap(){
+	showRawMap();
+	ww = getWidth;
+	hh = getHeight;
+	setSlice(1);
+	valids = 0;
+	invalids = 0;
+	for (xx =1; xx < ww; xx++){
+		id = getPixel(xx, 0);
+		index = ojIdToIndex(id);
+		if (index == 0 ){
+			invalids++;
+		}
+		else { 
+			valids++;
+			if (invalids > 0){
+				left = xx - invalids;
+				makeRectangle(left, 0, ww - left, hh);
+				run("Translate...", "x=-" + invalids + " y=0 interpolation=None stack");
+				invalids = 0;
+				xx = left;
+			}
+		}
+	}
+	newWidth = valids + 1;
+	if (newWidth < ww){
+		makeRectangle(0, 0, newWidth, hh);
+		run("Crop");
+		makeRectangle(0, 4, newWidth, hh-4);
+		for (slc = 1; slc <= nSlices; slc++){
+			setSlice(slc);
+			run("Enhance Contrast", "saturated=0.35");
+		}
+		setSlice(1);
+		run("Select None");
+		saveMap();
+	}
+}
+
+//returns array holding qualified rank positions of a  column
+//example: if cell 5 has smallest value and is qualified, arr[0] = 5
+
+
+
+macro "Sorted and Qualified Map"{
+	toSort = selectColumnTitle();
+	makeDualMap(toSort);
+}
+//--Map:: a) compacts and orders map
+//       b) can create sorted and qualified map
+function makeDualMap(sortColumn){
+	title = "" + ojGetProjectName() + "-Map.tif";
+	mapPath = "" + ojGetProjectPath() + title;
+	close(title);//11.7.2013
+	setBatchMode(batchFlag);
+	showRawMap();
+	ww = getWidth;
+	hh = getHeight;
+	if (!isMapClean()){
+		run("Canvas Size...", "width=" + ww + " height=" + (hh * 2) + " position=Top-Left zero");
+		run("Set... ", "zoom=100 x=0 y=0");
+
+		makeRectangle(0, 0, ww, 1);//include leading zero
+		idList = getProfile;
+		indexes = newArray(ww);
+		for (jj = 0; jj < ww; jj++)
+			indexes[jj] = ojIdToIndex(getPixel(jj, 0));
+		for (slc = 1; slc <= nSlices; slc++){
+			setSlice(slc);
+			for (jj = 0; jj < ww; jj++){//put lower half in ascending object order
+				if (indexes[jj] > 0){
+					makeRectangle(jj, 0, 1, hh);
+					run("Copy");
+					makeRectangle(indexes[jj],  hh, 1, hh);
+					run("Paste");
+				}
+			}
+		}
+		makeRectangle(0, hh, ww, hh);
+		run("Crop");
+		makeRectangle(0, 4, ww, hh-8);
+		run("Enhance Contrast", "saturated=0.35");
+		run("Select None");
+		save(mapPath);
+	}
+	if (sortColumn != ""){
+		run("Duplicate...", "title=[Sorted Map] duplicate");
+		run("Canvas Size...", "width=" + ww + " height=" + (hh * 2) + " position=Top-Left zero");
+		indexes = rankedPositions(sortColumn);
+		len = indexes.length;
+		for (slc = 1; slc <= nSlices; slc++){
+			setSlice(slc);
+			for (jj = 0; jj < len; jj++){
+				obj = indexes[jj] + 1;
+				makeRectangle(obj, 0, 1, hh);//start to pick smallest
+				run("Copy");
+				makeRectangle(jj + 1,  hh, 1, hh);//start with left-most
+				run("Paste");
+				showProgress(jj/len);
+			}
+			makeRectangle(0, hh + 4, len, hh-8);
+			run("Enhance Contrast", "saturated=0.35");
+		}
+		makeRectangle(0, hh, len+1, hh);
+		run("Crop");
+	}
+	setBatchMode("exit and display");
+}
+
+// Updates result columns are retrieved from the map
+macro "Update Map-depending Results"{
+	ojRequires("1.03e");
+	ojHideResults();
+	ojDeleteColumn("_*");
+	ojSetColumnProperty("Axis", "sort", 0);
+	pxSize = ojGetVoxelSize(1, "x");
+	showCompactedMap();
+	flChannel = 0;//02.07.13 14:41
+	if (nSlices > 1){
+		flChannel = getNumber("Use Fluorescence from Channel (2.."+nSlices + "):", 2);
+	}
+	showProgress(0.05);
+
+	if (flChannel > nSlices)
+		exit("Invalid Channel");
+	ojDeleteColumn("FluorTotal");
+	ojDeleteColumn("FluorCenter");
+	ojDeleteColumn("FluorPole");
+	ojDeleteColumn("ConcCenter");
+	ojDeleteColumn("ConcOffCenter");
+	ojDeleteColumn("FCPlus");
+	ojDeleteColumn("FlChannel");
+	ojDeleteColumn("MinDiaCenter");
+	ojDeleteColumn("MaxDia");
+	ojDeleteColumn("VolCenter");
+	ojDeleteColumn("VolTwins");
+
+	ojInitColumn("Volume");
+
+
+	if (advancedResults){
+		ojInitColumn("MinDiaCenter");
+		ojInitColumn("MaxDia");
+		ojInitColumn("VolCenter");
+	}
+	showProgress(0.1);
+
+	if (flChannel >=2){
+		ojInitColumn("FlChannel");
+		ojSetColumnProperty("FlChannel", "digits", 0);
+		ojSetColumnProperty("FlChannel", "color", 0x0000ff);
+		ojInitColumn("FluorTotal");
+		if (advancedResults){
+			ojInitColumn("FluorCenter");
+			ojInitColumn("FluorPole");
+			ojInitColumn("ConcCenter");
+			ojInitColumn("ConcOffCenter");
+			ojInitColumn("FCPlus");
+		}
+	}
+	
+	
+	
+	
+	if (twinsFlag){
+		ojInitColumn("VolTwins");
+	}
+	
+	
+	
+	if (getWidth == 1) {
+		close;
+		exit ("Map is empty, columns were cleared");
+	}
+	setSlice(1);
+	for (x = 1; x < getWidth; x++){
+		obj = ojIdToIndex(getPixel(x, 0));
+		if (obj > 0){
+			showProgress(x/getWidth);
+			start = getPixel(x, 1);
+			len = getPixel(x, 2);
+			minDiaCenter = 1e9;
+			maxDiameter = 0;
+			centerVol = 0;
+			totalVol = 0;
+			centerFluor = 0;
+			totalFluor = 0;
+			poleFluor = 0;
+			radius = ojResult("Dia", obj)/pxSize/2; //cell radius in pixels
+			endPiece = radius;
+			//endPiece = 0.6/pxSize; //if you want to define the pole as 0.6 um
+			
+			for (y= start; y < (start + len); y++){
+				inCenter = ((pxSize * abs (start + len/2 -y)) < (centerPiece/2));
+				inPole = y < (start +radius) || y > (start + len - radius); 
+				setZCoordinate(0);
+				dia = getPixel(x, y);//local dia in um
+				maxDiameter = maxOf(dia, maxDiameter);
+				vol = dia * dia * PI/4 *pxSize;// in um^3
+				totalVol += vol;
+				if (inCenter){
+					centerVol += vol;
+					minDiaCenter = minOf(dia, minDiaCenter);		
+				}
+				if (flChannel >= 1){
+					setZCoordinate(flChannel-1);//0-based
+					fluor = getPixel(x, y)/1000;
+					totalFluor += fluor;
+					if (inCenter)
+						centerFluor += fluor;
+					if (inPole){
+						poleFluor += fluor;	
+					}						
+				}
+			}
+			ojSetResult("Volume", obj, totalVol);
+			if (advancedResults){
+				ojSetResult("MinDiaCenter", obj, minDiaCenter);
+				ojSetResult("MaxDia", obj, maxDiameter);
+				ojSetResult("VolCenter", obj, centerVol);
+			}
+			if (flChannel >= 1){
+				if (advancedResults){
+					totalConc = totalFluor/totalVol;
+					centerConc = centerFluor/centerVol;
+					offCenterConc = (totalFluor - centerFluor)/(totalVol - centerVol);
+					fcPlus = (centerConc - offCenterConc) * centerVol;
+				
+					ojSetResult("FluorCenter", obj, centerFluor);
+					ojSetResult("FluorPole", obj, poleFluor);
+					ojSetResult("ConcCenter", obj, centerConc);
+					ojSetResult("ConcOffCenter", obj, (totalFluor - centerFluor)/ (totalVol - centerVol));
+					ojSetResult("FCPlus", obj, fcPlus);
+				}
+				ojSetResult("FluorTotal", obj, totalFluor);
+				ojSetResult("FlChannel", obj, flChannel);
+
+			}
+		}
+	}
+	
+	if (twinsFlag){
+		ojSetColumnProperty("Dia", "sort", 1);
+		fivePercent = round(ojNObjects()/100*5);
+		obj5 = ojRankToIndex(fivePercent);
+		diaS = ojResult("Dia", obj5);
+		ojSetColumnProperty("Dia", "sort", 0);//unsort
+		for (obj = 1; obj <= ojNObjects(); obj++){
+			len = ojResult("Axis", obj);
+			ww = ojResult("Dia", obj);
+			volTwins = getTwinVolume(len, diaS, ww);
+			ojSetResult("VolTwins", obj, volTwins);
+		}
+	}
+	
+	createAgeColumn("Axis", "Age");
+	ojShowResults();
+}
+
+//toggles between composite and gray
+macro "Display mode (compos./gray) [D]"{ //*___*
+	selectImage(getImageID);//work-around- but we get a nullpointer
+	if (ojImageLink() == 0)
+		exit("Front image is not linked");
+	Stack.getDisplayMode(mode); 
+	if (mode == "composite")
+		Stack.setDisplayMode("grayscale");
+	else {
+		Stack.setDisplayMode("composite");
+		Stack.getPosition(channel, slice, frame);
+		Stack.setPosition(1, slice, frame);
+		run("Blue");
+		Stack.setPosition(channel, slice, frame);		
+	}
+}
+
+
+
+
+macro "Show/Hide Outlines [F6]"{
+	if (selectionType == 4 || selectionType == 9 )// composite or traced
+		run("Select None");
+	else
+ 		showOutlines();
+}
+
+
+
+//shows previous cell zoomed (respects qualifying and sorting)
+macro "<Navigate>Zoom to previous Object      [F1]"{
+	navigate(-1, myZoom);
+}
+
+//shows next cell zoomed (respects qualifying and sorting)
+macro "<Navigate>Zoom to next Object      [F2]"{
+	navigate(1, myZoom);
+}
+
+//shows currrently selected cell zoomed
+macro "<Navigate>Zoom to current Object      [F3]"{
+	navigate(0, myZoom);
+}
+
+//shows cell # xx zoomed
+macro "<Navigate>Zoom to Object#...     [F4]"{
+	obj = getNumber("Show Object No:  ", maxOf(ojSelectedObject(), 1));
+	showZoomed(obj, myZoom);	
+}
+
+
+
+//shortcut 
+
+macro "<Navigate>-"{
+	
+}
+
+macro "<Navigate>Orig Scale   [F5]"{
+	run("Original Scale");
+}
+
+
+//re-opens all linked images on-top of each other for browsing
+macro "<Navigate>Use Virtual Stacks for Browsing"{
+	openAllVirtually();
+	for (img = 1; img <= ojNImages(); img++){
+		ojShowImage(img);
+		Stack.setChannel(1);
+		Stack.setDisplayMode("composite");
+		run("Blue");
+		setLocation(300, 50, 700, 700);
+		ojZoom(3, 0, 0);//zoom at factor 3
+	}
+}
+
+// used for cell browsing
+function navigate(delta, zoomFactor){    
+	obj = ojGetOpenObject();
+	if (obj > 0) 
+		ojCloseObject();
+	else 
+		obj = ojSelectedObject();
+	if (obj==0) {
+		if (lastShowed > 0 && lastShowed<= ojNObjects())
+			suggest = lastShowed;
+		else
+			suggest = 1;
+		showMessageWithCancel("No Object is selected, go to object #"+ suggest +" ?");
+		obj = suggest;
+		}
+	else {
+		row = ojIndexToRank(obj);
+		row += delta;
+		obj = ojRankToIndex(row);		
+	}
+	if (obj > ojNObjects() || obj <1 )
+		beep;
+	else {
+		showZoomed(obj, zoomFactor);	
+		lastShowed = obj;
+	}
+}
+
+
+//If selected object is not open yet, it will made open (italic number).
+// Then, to the next itemtype is switched,
+// and the underlying channel is shown.
+macro "<Navigate> Advance [A]"{//*___*
+	wasOpen = ojGetOpenObject();
+	sel = ojSelectedObject();
+	if (wasOpen > 0){
+		ojAdvance();
+		ss = ojActiveItemName();
+		if (ojGetOpenObject() != wasOpen){
+			showZoomed(wasOpen+1, myZoom);
+			ojOpenObject(wasOpen+1);
+			ojSwitchToItem(firstManualItem);
+			}
+		fixUnderlyingChannel();
+		}
+	
+	else if(sel > 0){
+		showZoomed(sel, myZoom);
+		ojOpenObject(sel);
+		ojSwitchToItem(firstManualItem);
+		fixUnderlyingChannel();
+	}
+}
+
+// closes current object and switches back to channel 1
+macro "<Navigate> Close Object      [c]"{
+	ojCloseObject();
+	ojSwitchToItem("Axis");
+	if(is("hyperstack"))
+		Stack.setChannel(1);
+}
+
+// closes current object and switches back to channel 1
+macro "<Navigate> Kill [k]"{
+	img = ojImageLink();
+	if (!(img>0)) exit;
+	sel = maxOf(ojSelectedObject(), ojGetOpenObject());
+	ojCloseObject();
+	if (sel > 0) {
+		row = ojIndexToRank(sel);
+		ojDeleteObject(sel);
+		wait(500);
+		sel = ojRowToIndex(row);
+		if (sel >0 && sel <= ojNObjects())
+			showZoomed(sel, myZoom);
+	}
+	else beep;
+}
+
+macro "-"{}
+
+//creates a table of spot coordinates 
+// and updates Seq column with sequence strings
+macro "Calculate Spots"{
+
+	ojHideResults();
+	ojDeleteColumn("_*");
+	ojDeleteColumn("avgOff*");
+	ojDeleteColumn("*-Mid");
+
+
+	ojDeleteColumn("*Spots");
+	defineBindings("*Spot");
+	for(jj = 0; jj < selectedNames.length; jj++){
+		ojInitColumn("n" + selectedNames[jj] + "s");
+		ojPutOperand(selectedNames[jj], 1, 1);
+		ojPutAlgorithm("count");
+	}
+	ojRecalculate();
+	
+	ojInitTextColumn("Seq");
+	ojInitTextColumn("Seq");//twice: work-around
+	
+	calcavgOffsets = false;
+	ojDeleteColumn("avgOff*");
+	ojDeleteColumn("_*");
+	if (calcavgOffsets){
+		
+		ojInitColumn("avgOffR");
+		ojInitColumn("avgOffG");
+		ojInitColumn("avgOffC");
+		
+		ojInitColumn("SepRG");//separation factor
+		
+		ojInitColumn("_Cell");
+		ojInitColumn("_OffR");
+		ojInitColumn("_OffG");
+		ojInitColumn("_OffC");
+		
+		ojSetColumnProperty("avgOffR", "color", 0xee0000);
+		ojSetColumnProperty("avgOffG", "color", 0x00aa00);
+		ojSetColumnProperty("avgOffC", "color", 0x00aaff);
+		ojSetColumnProperty("SepRG", "color", 0x888800);
+
+		ojSetColumnProperty("_OffR", "color", 0xee0000);
+		ojSetColumnProperty("_OffG", "color", 0x00aa00);
+		ojSetColumnProperty("_OffC", "color", 0x00aaff);
+	}
+
+
+
+	withTextTable = true;//<<
+	ojHideResults();
+	maxSpots= 0;
+	pattern = "*spot*";
+	max = ojNObjects();
+	for (obj = 1; obj <= max; obj++){
+		ojSelectObject(obj);
+		m = ojNItems(pattern);
+		if (m > maxSpots) maxSpots = m;
+		showProgress(obj/max/3);
+	}
+	if (withTextTable){
+		title1 = "Spot positions";
+		title2 = "["+title1+"]";
+		f = title2;
+		if (isOpen(title1))
+			print(f, "\\Clear");
+		else
+			run("Table...", "name="+title2+" width=250 height=600");     
+		headers = "\\Headings:n\tlen\tseq\tmirr";
+		for (col= 1; col <=maxSpots; col++){
+			headers = headers + "\ttype" + col + "\tpp" + col + "\toff" + col;
+		}
+		print(f, headers);
+		selectWindow(title1);
+	}
+//	ojInitTextColumn("Seq");
+			
+	for (obj = 1; obj <= max; obj++){
+		showProgress(obj/max);
+		ojSelectObject(obj);
+		len = ojResult("Axis", obj);
+		pxSize = ojGetVoxelSize(ojOwnerIndex(obj), "x");
+		nAxisPts = ojNPoints();//axispoints
+		nItems = ojNItems("*");
+		rowStr1 = "" + obj + "\t" + d2s(len, 2);
+		seqStr = "";
+		rowStr3 = "";
+		
+		types = newArray(1000);//max 1000 points per cell
+		paths = newArray(1000);
+		offsets = newArray(1000);
+		pCount = 0;
+		for (itm = 1; itm <= nItems; itm++){
+			ojSelectItem("*", itm);
+			thisName = ojGetItemName();
+			if (ojMatches(thisName, pattern)){// spot
+				typ = substring(thisName, 0, 1);//first char lowercase used as type
+				typ = toLowerCase(typ);
+				ojvInitStack("2d");
+				ojSelectObject(obj);
+				ojvPushItem();//push axis
+				ojSelectItem("*", itm);
+				ojvPushPoint(1);//push spot
+				partialPath = ojvCalculate("partialpath");
+				signedOff = ojvCalculate("partialpath signedoffset");
+				
+		
+				
+				types[pCount] = typ;
+				offsets[pCount] = signedOff*pxSize;
+				paths[pCount] = partialPath*pxSize;
+				pCount++;
+			}
+		}
+		
+			//04.04.12 12:38 calc mean offsets per type
+		if (calcavgOffsets){
+			sumR = 0;
+			countR = 0;
+			sumG = 0;
+			countG = 0;
+			sumC = 0;
+			countC = 0;
+			bottom = ojLastRow("*") + 1;
+			ojSetResult("_Cell", bottom, obj);
+			dia = ojResult("Dia", obj);
+			for (jj = 0; jj <pCount; jj++){
+				if (types[jj] == "r"){
+					ojSetResult("_OffR", bottom + countR, offsets[jj]/dia);
+					sumR += offsets[jj]/dia;
+					countR++;
+				}
+				if (types[jj] == "g"){
+					ojSetResult("_OffG", bottom + countG, offsets[jj]/dia);
+					sumG += offsets[jj]/dia;
+					countG++;
+				}
+				if (types[jj] == "c"){
+					ojSetResult("_OffC", bottom + countC, offsets[jj]/dia);
+					sumC += offsets[jj]/dia;
+					countC++;
+				}
+			
+			}
+			if (countR > 0){
+				avgOffR = sumR/countR;
+				ojSetResult("avgOffR", obj, avgOffR);
+			}
+			if (countG > 0){
+				avgOffG = sumG/countG;
+				ojSetResult("avgOffG", obj, avgOffG);
+			}
+			if (countC > 0){
+				avgOffC = sumC/countC;
+				ojSetResult("avgOffC", obj, avgOffC);
+			}	
+			
+		}
+		
+		paths = Array.trim(paths, pCount);
+		//ranks = getRanks(paths);
+		arr2 = Array.rankPositions(paths);//12.1.2013
+		ranks = Array.rankPositions(arr2);
+
+		paths2 = newArray(pCount);
+		types2 = newArray(pCount);
+		offsets2 = newArray(pCount);
+		for (jj = 0; jj < pCount; jj++){// sort spots along axis
+			rank = ranks[jj];
+			paths2[rank] = paths[jj];
+			types2[rank] = types[jj];
+			offsets2[rank] = offsets[jj];
+		}
+		for (jj = 0; jj < pCount; jj++){
+			typ = types2[jj];
+			path = paths2[jj];
+			off = offsets2[jj];
+			rowStr3 = rowStr3 + "\t" + typ + "\t" + d2s(path, 2) + "\t" + d2s(off, 2);
+			seqStr = seqStr + typ;
+		}
+		
+		mirr = "";//use mirror if it is alphabetically first
+		len = lengthOf(seqStr);
+		mirrStr = "";
+		for (kk = 0; kk < len; kk++)
+			mirr = mirr + substring(seqStr, len-kk-1, len -kk);
+		if (mirr < seqStr){
+			seqStr = mirr;
+			mirrStr = "m";
+		}
+		rowStr = rowStr1 + "\t" + seqStr + "\t" + mirrStr + rowStr3;
+		ojSetResult("Seq", obj, seqStr);
+		if (withTextTable)
+			print(f, rowStr);
+	}
+	//
+	ojInitColumn("Freq");
+	ojSetColumnProperty("Freq", "digits", 0);
+
+	max = ojNObjects();
+	for (obj = 1; obj <= max; obj++){
+		showProgress(obj/max);
+		if (ojQualified(obj)){
+			seq = ojResultString("Seq", obj);
+			freq = 1;
+			for (obj2 = obj + 1; obj2 <= max; obj2++){
+				seq2 = ojResultString("Seq", obj2);
+				if (seq2 == seq){
+					freq++;
+					ojQualify(obj2, false);
+				}
+			}
+			ojSetResult("Freq", obj, freq);
+		}
+	}
+	for (obj = 1; obj <= max; obj++)
+		ojQualify(obj, true);
+	if (withTextTable)
+		selectWindow(title1);
+	ojShowResults();
+		
+}
+
+
+
+macro "Scatter Plot: Spot Pos vs Length" {
+	selectWindow("ImageJ");
+	if (ojNImages() == 0) 
+		exit("No images are linked");	
+	defineBindings("*Spot");
+	ojHideResults();
+	nSpotNames = selectedNames.length;
+	Dialog.create("Plot Spot Positions");
+
+	for (jj = 0; jj < nSpotNames; jj++){
+		name= selectedNames[jj];
+		Dialog.addCheckbox(name, true);
+	}
+	Dialog.addNumber("Range [um]:", scatterRange);
+	Dialog.addString("Colors:", plotColors, 24);
+	Dialog.addString("Markers*:", plotMarkers, 24);
+	possibleMarkers = "circles boxes triangles crosses dots x";
+	Dialog.addNumber("Leader Channel", 0,  0, 4, "(0 = None)");
+	Dialog.addNumber("Leader Pole Fraction", 0.5, 2, 4, "(max 0.5 of cell length)");
+	Dialog.addCheckbox("Symmetric Plots**", false);
+	Dialog.addMessage("*" + possibleMarkers +"\n**Paints spots AND mirrored spots");
+	Dialog.show;
+
+	for (jj = 0; jj < nSpotNames; jj++)
+		if (!Dialog.getCheckbox)
+			selectedNames[jj] = "";
+	scatterRange = Dialog.getNumber;
+	plotColors = Dialog.getString;
+	colorsArr = split(plotColors + " black black black black", " ,");
+	plotMarkers = Dialog.getString;
+	markingArr = split(plotMarkers + " circles circles circles circles", " ,");
+	leaderChn = Dialog.getNumber;
+	hasFlipLeader = leaderChn > 0;
+	poleFraction = Dialog.getNumber;
+	symmetryFlag = Dialog.getCheckbox;
+	if (hasFlipLeader){
+		if (symmetryFlag) exit("Leader not allowed with Symmetric Plots"); 
+		showCompactedMap();
+		theMapID = getImageID;
+		doFlip(leaderChn, poleFraction, true, false);//flag=true, flip=false
+	}
+	ojHideResults();
+	xx = newArray(0, scatterRange);//draw the line
+	yy = newArray(0, scatterRange);
+	
+	Plot.create("Scatter Plot", "Length [um]", "Spot Pos. [um]");
+	Plot.setFrameSize(600, 250);
+	Plot.setLimits(0, scatterRange, 0, scatterRange);
+	Plot.setColor("black");
+	Plot.add("line", xx, yy);
+	
+	max = ojNObjects();
+	for (nn=0; nn<nSpotNames; nn++){
+		xx = newArray(99999);
+		yy = newArray(99999);
+		cnt = 0;
+		spotName = selectedNames[nn];
+		if (spotName != ""){
+			for (obj = 1; obj <= max; obj++){
+				showProgress(obj/max);
+				if (ojQualified(obj)){
+					axis = ojResult("Axis", obj);
+					
+					locs = getSpotCoords(obj, spotName);
+					for (ii = 0; ii < locs.length; ii++){
+						xx[cnt] = axis;
+						y = locs[ii];
+						if (hasFlipLeader){
+							chann = ojResult("Flip", obj);
+							if (chann > 0)
+								y = axis - y;
+						}
+						yy[cnt] = y;
+						cnt++;
+						if (symmetryFlag){
+							xx[cnt] = axis;
+							yy[cnt] = axis - y;
+							cnt++;
+						}
+					}
+				}
+			}
+			
+			xx = Array.trim(xx, cnt);
+			yy = Array.trim(yy, cnt);
+			Plot.setColor(colorsArr[nn]);
+			Plot.add(markingArr[nn], xx, yy);//<<
+		}
+	}
+	Plot.show;
+}
+
+
+//Tool to click in the profiles:  object from which the profile was created
+//will be brought to front.
+macro "Map to Marker Tool - C0a0T3f14M" {
+	altDown = (isKeyDown("alt"));
+	getCursorLoc(x, y, z, flags);
+	objId = getPixel(x, 0);
+	obj = ojIdToIndex(objId);
+	if (obj > 0)
+		showZoomed(obj, myZoom);
+}
+
+
+
+// With a "Map" in front, all cell profiles are resampled to  length =100 px
+//  and then averaged to a single profile, which is plotted.
+// The light gray profile resembles the mirror image of the blue DAPI profile,
+// in order to illustrate asymmetry. 
+
+macro "Plot Collective Profiles"{
+	if (nImages == 0 )
+		exit ("Front image title must contain \"Map\"");
+	if (!ojMatches(getTitle, "*Map*"))
+		exit ("Front image title must contain \"Map\"");
+	theMapID = getImageID;
+
+	Dialog.create("Collective Profiles");
+	msg = "Leader Channel will flip strong poles to top.";
+	msg += "\nOther channels will follow";
+	//msg3 = "\n** Arranges profiles as stack";
+	Dialog.addMessage(msg);
+	Dialog.addNumber("Leader Channel for flipping:", 0,   0, 3, "(0 = disabled)");
+	Dialog.addNumber("Leader Pole Fraction:", 0.50,   2, 4, "(max 0.5 of cell length)");
+	Dialog.addString("Channels to be plotted:", "2, 3");
+	Dialog.addNumber("Show Mirror Plot of Channel:", 0,  0, 3, "(0 = disabled)");
+	Dialog.addString("Colors Chn 1..4:", "magenta, #00cc00, #00cccc, red", 30);
+	Dialog.addNumber("Age Groups to Resolve:", 1,  0, 3, "(Stacked profiles if > 1)");
+
+
+	Dialog.addNumber("Time Intervals to group:", 1,  0, 3, "(Cannot be higher than no. time points*)"); //Added by KV
+	Dialog.addCheckbox("Override width of time interval groups to not be equal**", 0);
+
+
+	Dialog.addCheckbox("Symmetrical Plots***", 0);
+
+	
+	Dialog.addMessage("*If set to 1, plot will focus on age"); //Added by KV
+	Dialog.addMessage("**Groups are decided in next dialog"); //Added by KV
+
+	Dialog.addMessage("***Averages each profile with its mirror image");
+	Dialog.show();
+	flipLeader = Dialog.getNumber;
+	poleFraction = Dialog.getNumber;
+	plottedChn = Dialog.getString;
+	mirrorChn = Dialog.getNumber;
+	ageGroups = round(Dialog.getNumber);
+	if (ageGroups != 1 && ojColumnNumber("Age") == 0) exit ("Age column is missing; choose: \n \nObjectJ> Update Map-depending Results");
+	colors = split(Dialog.getString, ", ");
+	
+
+	timeGroups = round(Dialog.getNumber); //Added by KV
+	if (timeGroups != 1 && ojColumnNumber("ImgNo") == 0) exit ("ImgNo column is missing; choose: \n \nObjectJ> Update Map-depending Results");
+	overrideTimegroups = Dialog.getCheckbox;
+	maxTimegroup = ojGetStatistics("ImgNo", "max");
+	maxTimegroup = maxTimegroup + 1; //Must add 1 since ImgNo is zero indexed
+
+	fullSymmetry = Dialog.getCheckbox;
+	if (fullSymmetry && flipLeader != 0){
+		exit("No leader allowed in symmetrical mode");
+	}
+	
+	if (overrideTimegroups != 0){ //Added by KV	
+		timeGroupArray = newArray(timeGroups);
+		
+		Dialog.create("Override grouping of timepoints");
+		Dialog.addMessage("Specify the number of time points to be included in each group");
+		Dialog.addMessage("Group 1 will start from the first time point, while the last group will contain the last time point");
+		Dialog.addMessage("The sum of time points must equal " + maxTimegroup);
+		for (group = 0; group < timeGroups; group++){
+			groupNumPrint = group + 1;
+			groupMsg = "Timepoints included in group " + groupNumPrint + ":";
+			Dialog.addNumber(groupMsg, 1, 0, 3, ""); 
+		}
+		Dialog.show();
+		for (group = 0; group < timeGroups; group++){
+			timeGroupArray[group] = Dialog.getNumber; 
+		}
+		Array.getStatistics(timeGroupArray, minInt, maxInt, meanInt, sdInt);
+		timeGroupSum = meanInt * lengthOf(timeGroupArray);
+		if  (timeGroupSum != maxTimegroup){
+			exit("The total number of timepoints in new groups does not match the number of timepoints in the data")
+		}
+	}
+
+
+	getDimensions(width, height, nChannels, slices, frames);//width = number of objects + 1
+	Stack.getPosition(currentCh, slice, frame);
+	if (flipLeader > 0){
+		run("Duplicate...", "title=flipped_Map duplicate");
+		doFlip(flipLeader, poleFraction, false, true);//flag, flip
+		Stack.setChannel(flipLeader);
+		theMapID = getImageID;//8.5.2014
+	}
+	close("Profile along axis");
+	setBatchMode(false);
+	mirrorPlot = newArray(1); 
+	
+	run("Clear Results");
+
+
+	
+	if (ageGroups == 1 && timeGroups > 1){ //Added by KV
+		
+		timeBin = newArray(timeGroups);
+		if (overrideTimegroups == 0){
+			for (binNumber = 0; binNumber < timeGroups; binNumber++){
+				timeBin[binNumber] = maxTimegroup/timeGroups;
+			}
+		}
+		else{
+			for (binNumber = 0; binNumber < timeGroups; binNumber++){
+				timeBin[binNumber] = timeGroupArray[binNumber];
+			}
+		}
+
+
+		for (timegroup = 0; timegroup< timeGroups; timegroup++){ //Added by KV
+			selectImage(theMapID);
+			
+			timeStart = 0;
+			if (timegroup > 0){
+				for (timepoint = 0; timepoint < timegroup; timepoint++){
+					timeStart = timeStart + timeBin[timepoint];
+				}
+			}
+			
+			if (floor(timeStart + 1) == floor(timeStart + timeBin[timegroup])){
+				colTitle = "Timepoint=" + floor(timeStart + 1); 
+			}
+			else{
+				colTitle = "Timepoint=" + floor(timeStart + 1) + "-" + floor(timeStart + timeBin[timegroup]);  
+			}
+
+			Plot.create("Profile along axis", "Axial Position [%]", "Local brightness");
+			Plot.setFrameSize(450, 200);
+			Plot.setLimits(0, 100, 0, 1);
+			Plot.setLineWidth(2);
+			
+			cellCounts = 0;
+			
+			if (indexOf(plottedChn, "1")>=0){
+				Stack.setChannel(1);
+				Plot.setColor(colors[0]);
+				plot = collectiveProfile(0, 1, 0, 0, timeStart, timeBin[timegroup], maxTimegroup, fullSymmetry, false);
+				cellCounts = collectiveProfile(0, 1, 0, 0, timeStart, timeBin[timegroup], maxTimegroup, fullSymmetry, true);
+				addToTable("ch1_"+ colTitle, plot);
+				Plot.add("line", plot);
+				if (mirrorChn == 1)
+					mirrorPlot = plot;
+			}
+
+			if (indexOf(plottedChn, "2")>=0 && nChannels >=2){
+				Stack.setChannel(2);
+				Plot.setColor(colors[1]);
+				plot = collectiveProfile(0, 1, 0, 0, timeStart, timeBin[timegroup], maxTimegroup, fullSymmetry, false);
+				cellCounts = collectiveProfile(0, 1, 0, 0, timeStart, timeBin[timegroup], maxTimegroup, fullSymmetry, true);
+				addToTable("ch2_"+ colTitle, plot);
+				Plot.add("line", plot);
+				if (mirrorChn == 2)
+					mirrorPlot = plot;
+			}
+	
+			if (indexOf(plottedChn, "3")>=0 && nChannels >=3){
+				Stack.setChannel(3);
+				Plot.setColor(colors[2]);
+				plot = collectiveProfile(0, 1, 0, 0, timeStart, timeBin[timegroup], maxTimegroup, fullSymmetry, false);
+				cellCounts = collectiveProfile(0, 1, 0, 0, timeStart, timeBin[timegroup], maxTimegroup, fullSymmetry, true);
+				addToTable("ch3_"+ colTitle, plot);
+				Plot.add("line", plot);
+				if (mirrorChn == 3)
+					mirrorPlot = plot;
+			}
+	
+			if (indexOf(plottedChn, "4")>=0 && nChannels >=4){
+				Stack.setChannel(4);
+				Plot.setColor(colors[3]);
+				plot = collectiveProfile(0, 1, 0, 0, timeStart, timeBin[timegroup], maxTimegroup, fullSymmetry, false);
+				cellCounts = collectiveProfile(0, 1, 0, 0, timeStart, timeBin[timegroup], maxTimegroup, fullSymmetry, true);
+				addToTable("ch4_"+ colTitle, plot);
+				Plot.add("line", plot);
+				if (mirrorChn == 4)
+					mirrorPlot = plot;
+			}
+		
+			if (mirrorPlot.length > 1 && !fullSymmetry){
+				Plot.setColor(colors[mirrorChn-1]);
+				Array.invert(mirrorPlot);
+				Plot.setLineWidth(1);
+				Plot.add("line", mirrorPlot);	
+			}
+			Stack.setChannel(currentCh);
+	
+			Plot.show;
+			wait(100);
+			singlePlotID = getImageID;
+			x = 2;
+			y = getHeight - 6;
+			for (chn = 1; chn <= nChannels; chn++){
+				if (indexOf(plottedChn, "" + chn) >=0){
+					setFont("SansSerif", 12, " antialiased");
+					theColor = colors[chn - 1];
+					setColor(colors[chn - 1]);
+					y -= 16;
+					drawString("ch" + chn, x, y);
+					//drawString("ch" + chn, x, y);
+				}
+			}
+			setColor("black");
+			
+				
+			if (floor(timeStart + 1) == floor(timeStart + timeBin[timegroup])){ //Added by KV
+				drawString("Timepoint=" + floor(timeStart + 1) + ", n=" + cellCounts, 2, getHeight - 4); 
+			}
+			else{
+				drawString("Timepoint=" + floor(timeStart + 1) + "-" + floor(timeStart + timeBin[timegroup]) + ", n=" + cellCounts, 2, getHeight - 4);  
+			}				
+
+			if (timegroup == 0)
+				plotStackID = getImageID;
+			else{
+				selectImage(singlePlotID);
+				rename("tmpPlot");
+				run("Select All");
+				run("Copy");
+				//close;
+				selectImage(plotStackID);
+				run("Add Slice");
+				run("Paste");
+				run("Select None");
+				plotStackID = getImageID;
+			}
+		}
+	}
+	else{
+		if (ageGroups != 1 && timeGroups != 1){	
+			exit("Cannot resolve data by both time and age. Choose only one.")
+		}
+		else{
+		for (group = 0; group< ageGroups; group++){
+		
+			selectImage(theMapID);
+			ageBin = 1/ageGroups;
+			ageStart = group * ageBin;
+			colTitle = "age=" + round(100*ageStart) + "-" + round(100*(ageStart+ ageBin)) + "%";
+			if (ageGroups == 1) colTitle =""; //don't list single group
+
+			Plot.create("Profile along axis", "Axial Position [%]", "Local brightness");
+			Plot.setFrameSize(450, 200);
+			Plot.setLimits(0, 100, 0, 1);
+			Plot.setLineWidth(2);
+
+			if (indexOf(plottedChn, "1")>=0){
+				Stack.setChannel(1);
+				Plot.setColor(colors[0]);
+				plot = collectiveProfile(0, 1, ageStart, ageBin, 0, 0, 0, fullSymmetry, false);
+				addToTable("ch1_"+ colTitle, plot);
+				Plot.add("line", plot);
+				if (mirrorChn == 1)
+					mirrorPlot = plot;
+			}
+
+			if (indexOf(plottedChn, "2")>=0 && nChannels >=2){
+				Stack.setChannel(2);
+				Plot.setColor(colors[1]);
+				plot = collectiveProfile(0, 1, ageStart, ageBin, 0, 0, 0, fullSymmetry, false);
+				addToTable("ch2_"+ colTitle, plot);
+				Plot.add("line", plot);
+				if (mirrorChn == 2)
+					mirrorPlot = plot;
+			}
+	
+			if (indexOf(plottedChn, "3")>=0 && nChannels >=3){
+				Stack.setChannel(3);
+				Plot.setColor(colors[2]);
+				plot = collectiveProfile(0, 1, ageStart, ageBin, 0, 0, 0, fullSymmetry, false);
+				addToTable("ch3_"+ colTitle, plot);
+				Plot.add("line", plot);
+				if (mirrorChn == 3)
+					mirrorPlot = plot;
+			}
+	
+			if (indexOf(plottedChn, "4")>=0 && nChannels >=4){
+				Stack.setChannel(4);
+				Plot.setColor(colors[3]);
+				plot = collectiveProfile(0, 1, ageStart, ageBin, 0, 0, 0, fullSymmetry, false);
+				addToTable("ch4_"+ colTitle, plot);
+				Plot.add("line", plot);
+				if (mirrorChn == 4)
+					mirrorPlot = plot;
+			}
+		
+			if (mirrorPlot.length > 1 && !fullSymmetry){
+				Plot.setColor(colors[mirrorChn-1]);
+				Array.invert(mirrorPlot);
+				Plot.setLineWidth(1);
+				Plot.add("line", mirrorPlot);	
+			}
+			Stack.setChannel(currentCh);
+	
+			Plot.show;
+			wait(100);
+			singlePlotID = getImageID;
+			x = 2;
+			y = getHeight - 6;
+			for (chn = 1; chn <= nChannels; chn++){
+				if (indexOf(plottedChn, "" + chn) >=0){
+					setFont("SansSerif", 12, " antialiased");
+					theColor = colors[chn - 1];
+					setColor(colors[chn - 1]);
+					y -= 16;
+					drawString("ch" + chn, x, y);
+					//drawString("ch" + chn, x, y);
+				}
+			}
+			setColor("black");
+			if (ageGroups > 1){
+				drawString("Age=" + round(ageStart*100) + ".." +round((ageStart + ageBin)*100) + "%", 2, getHeight - 4);
+				if (group == 0)
+					plotStackID = getImageID;
+				else{
+					selectImage(singlePlotID);
+					rename("tmpPlot");
+					run("Select All");
+					run("Copy");
+					//close;
+					selectImage(plotStackID);
+					run("Add Slice");
+					run("Paste");
+					run("Select None");
+					plotStackID = getImageID;
+				}
+			}
+		}
+		}
+	} //Added by KV
+	if (lengthOf(colTitle) > 6)
+		IJ.renameResults("Collective_Profiles.txt");
+	setSlice(1);//first age group
+	close("tmpPlot");
+	setOption("changes", false);
+}
+
+function addToTable(title, plot){
+	if (lengthOf(colTitle) <= 6)
+		return;
+	for (row = 0; row < plot.length; row++)
+		setResult(title, row, plot[row]);
+}
+
+
+//returns partial spot paths of an object as array
+function getSpotCoords(obj, spotType){
+	ojSelectObject(obj);
+	nSpots = ojNItems(spotType);
+	locations = newArray(nSpots);
+	pixWidth = ojGetVoxelSize(ojOwnerIndex(obj), "x");
+
+	for (spot = 1; spot <= nSpots; spot++){
+		ojvInitStack("2d");
+		ojSelectObject(obj);
+		ojvPushItem();//the axis
+		ojSelectItem(spotType, spot);
+		ojvPushPoint(1);
+		partialPath = ojvCalculate("partialpath");
+		locations[spot-1] = partialPath * pixWidth;
+	}
+	return locations;
+}
+
+
+//installs the GraphaAssistant as tool menu with logo "GA"
+var plotAssistantPath;
+function installGraphAssistant(){
+	dir = ojGetProjectPath();
+	if (!endsWith(dir,"/"))
+	dir = dir + "/";
+	plotAssistantPath = dir +"Graph-Assistant.txt";
+	if (File.exists(plotAssistantPath))
+		run("Install...", "install=[" + plotAssistantPath +"]");
+	else {
+		showStatus("File not found: " + plotAssistantPath);
+		}
+	return 0;
+}
+
+
+//returns array of 101 elements containing profile of age group
+//Either mean or max is normalised to 1
+function collectiveProfile(normMean, normMax, ageStart, ageBin, timeStart, timeBinValue, maxTimegroup, fullSymmetry, plotOnlyCellCount){
+	k100 = 101;
+	accu = newArray(k100);
+	nCells = getWidth - 1;
+	chosenCells = 0;
+
+	for (xx = 1; xx <= nCells; xx++){
+		if (timeBinValue != 0){
+			if (timeBinValue < maxTimegroup-1){
+				id = getPixel(xx, 0);
+				obj = ojIdToIndex(id);
+				timepoint = ojResult("ImgNo", obj);
+				inTimeBin = timepoint >= floor(timeStart) && timepoint <= floor(timeStart + timeBinValue - 1);
+			}
+			else{
+				inTimeBin = true;
+			}
+			if (inTimeBin){
+				chosenCells++;
+				start = getPixel(xx, 1);
+				len = getPixel(xx, 2);
+				if (start > 0 && len > 0){
+					arr = newArray(len);
+					for (yy = start; yy < start + len; yy++){//first and last element = 0
+						arr[yy - start] = getPixel(xx, yy);
+					}
+					arr100 = Array.resample(arr, k100);//
+					for (jj = 0; jj < arr100.length; jj++){
+						accu[jj] += arr100[jj];
+					}
+				}
+			}
+		}
+		else{
+		if (timeStart == 0 && timeBinValue == 0){
+			if (ageBin < 1){
+				id = getPixel(xx, 0);
+				obj = ojIdToIndex(id);
+				age = ojResult("Age", obj)/100;
+				inAgeBin = age >= ageStart && age < ageStart + ageBin;
+			}
+			else{
+				inAgeBin = true;
+			}
+			if (inAgeBin){
+				chosenCells++;
+				start = getPixel(xx, 1);
+				len = getPixel(xx, 2);
+				if (start > 0 && len > 0){
+					arr = newArray(len);
+					for (yy = start; yy < start + len; yy++){//first and last element = 0
+						arr[yy - start] = getPixel(xx, yy);
+					}
+					arr100 = Array.resample(arr, k100);//
+					for (jj = 0; jj < arr100.length; jj++){
+						accu[jj] += arr100[jj];
+					}
+				}
+			}
+		}
+		else{
+			exit("There is an error in the code")
+		}
+		}
+	}
+
+	if (plotOnlyCellCount == true){ //Added by KV
+		return chosenCells;
+	}
+	else{
+		len = accu.length;
+		for (jj = 0; jj < len; jj++)
+			accu[jj] /= chosenCells;
+		if (fullSymmetry)
+			for (jj = 0; jj < len/2; jj++){
+				avg = (accu[jj] + accu[len -jj - 1])/2;
+				accu[jj] = avg;
+				accu[len -jj - 1] = avg;
+			}
+			
+		factor = 1;
+		Array.getStatistics(accu, min, max, mean, stdDev);
+		if (normMean !=0)
+			factor =  normMean/mean;
+		else if (normMax !=0)
+			factor =  normMax/max;
+			
+		if (factor != 1)
+			for (jj = 0; jj < k100; jj++)
+				accu[jj] *= factor;
+	
+		return accu;	
+	}
+
+}
+
+
+// does calculations based on cell shape and fluorescence
+function calcConcentrations(){
+	ojInitColumn("ConcCenter");
+	ojInitColumn("ConcOffCenter");
+	ojInitColumn("FCPlus");
+	for (obj = 1; obj <= ojNObjects(); obj++){
+		flTotal = ojResult("FluorTotal", obj);
+		flCenter = ojResult("FluorCenter", obj);
+		volTotal = ojResult("Volume", obj);
+		volCenter = ojResult("VolCenter", obj);
+		concCenter = flCenter / volCenter;
+		concOffCenter =  (flTotal - flCenter) / (volTotal- volCenter);
+		flCenterPlus = (concCenter - concOffCenter) *volCenter;
+		
+		ojSetResult("ConcOffCenter", obj, concOffCenter);
+		ojSetResult("ConcCenter", obj, concCenter);
+		ojSetResult("FCPlus", obj, flCenterPlus);
+	}
+}
+
+
+//If front image is a "Map" (sorted or not), cells are flipped vertically. E.g. if leaderChn=2, then
+//in channel 2 (green) the strong pole is on the top. All other channels follow channel 2.
+
+function doFlip(leaderChn, poleFraction, flagIt, flipIt){
+	if (flagIt)
+		ojInitColumn("Flip");
+	ojSetColumnProperty("Flip", "visible", 0);
+	Stack.setChannel(leaderChn);
+	setBatchMode(batchFlag);
+	width = getWidth;//number of objects + 1
+	for (x = 1; x< width; x++){
+		selectPart(x, "upper", poleFraction);
+		getRawStatistics(nPixels, mean1, min1, max1);
+		selectPart(x, "lower", poleFraction);
+		getRawStatistics(nPixels, mean2, min2, max2);
+		if (mean2 > mean1){
+			if (flipIt){
+				selectPart(x, "all", poleFraction);
+				run("Flip Vertically", "stack");
+			}
+			if (flagIt){
+				id = getPixel(x, 0);
+				obj = ojIdToIndex(id);
+				ojSetValue("Flip", obj, leaderChn);
+			}
+		}
+	}
+	setBatchMode(false);
+	run("Select None");
+}
+
+function selectPart(x, part, poleFraction){
+	start = getPixel(x, 1);
+	len = getPixel(x,2);
+	capLen = floor(len * poleFraction);
+	if (part=="upper")
+		makeRectangle(x, start, 1, capLen);
+	else if (part=="lower")
+		makeRectangle(x, start + len - capLen, 1, capLen);
+	else //if (part=="all")
+		makeRectangle(x, start, 1, len);
+}
+
+//create test bacteria, len = 2..15 um, dia = 1 um
+macro "Create testStack"{
+	k250 = 250;
+	run("Close All");
+	scale = 16;
+	centerX = 256;
+	nFrames = 5;
+	newImage("TestStack", "8-bit color-mode", 512, 512, 2, 1, nFrames);
+	setVoxelSize(1/scale, 1/scale, 0, "um")
+	setSlice(1);
+	run("Grays");
+	run("Select All");
+	run("Set...", "value=200");
+	dia = 16;
+	smallDia = 12; 
+	cWidth = 6;//constr. width
+	centrePieceTest = 12; //= 0.75 um
+	yy = 40;
+	run("Line Width...", "line=1");
+	for (len = 32; len<= 208; len += 16){
+		leftHook = centerX-len/2;
+		setSlice(1);
+		makeOval(leftHook, yy, dia, dia);
+		setKeyDown("shift");
+		//run("Set...", "value=55");
+		makeOval(leftHook + len - dia, yy, dia, dia);
+		//run("Set...", "value=55");
+		setKeyDown("shift");
+		makeRectangle(leftHook + dia/2, yy, len - dia, dia);
+		run("Set...", "value=55");//paint PhC
+		
+		if (len == 96){//make a constriction
+			halfCWidth = cWidth/2;
+			makeRectangle(centerX -halfCWidth,  yy, cWidth, dia);
+			run("Set...", "value=200");
+			makeRectangle(centerX -5,  yy+(dia - smallDia)/2, 10, smallDia);
+			run("Set...", "value=55");
+			
+			setSlice(2);
+			makeRectangle(0, 1, 4, 2);
+			setKeyDown("shift");
+			makeRectangle(1, 0, 2, 1);
+			for (pair = -2; pair <=2 ; pair++){
+				setSelectionLocation(256 - pair * 12, yy + 2);
+				run("Set...", "value=100");
+				if (pair == 0){
+					setSelectionLocation(256 - pair * 12, yy + 8);
+					run("Set...", "value=100");
+				}
+			}
+			
+		}
+		else {
+			setSlice(2);
+			run("Set...", "value=55");
+			makeRectangle(centerX - 10, yy + 3, 20, 10);
+			run("Set...", "value=155");
+		}
+		yy += 30;
+	}
+	angle = 0;
+	for (set = 2; set <= nFrames; set++){
+		angle += 10;
+		setSlice(1);
+		run("Select All");
+		run("Copy");
+		setSlice(set *2 - 1);
+		run("Paste");
+		//makeOval(0, 0, 512, 512);
+		setBackgroundColor(200, 200, 200 );
+		run("Rotate... ", "angle=" + angle + " fill interpolation=Bilinear slice");
+
+		setSlice(2);
+		run("Select All");
+		run("Copy");
+		setSlice(set *2 );
+		run("Paste");
+		makeOval(0, 0, 512, 512);
+		setBackgroundColor(0, 0, 0);
+		run("Rotate... ", "angle=" + angle + " fill interpolation=Bilinear slice");
+	}
+	run("Select None");
+	setSlice(1);
+	
+	//values expected:
+	len = 96;
+	scale3 = pow(scale, 3);
+	volOffConstr = dia * dia * PI/4 * (len-dia -cWidth) + dia * dia * dia * PI/6; // volume non-constriction part
+	volConstr = smallDia * smallDia * PI/4 * cWidth;// volume constriction part
+	volCenter = volConstr + (centrePieceTest - cWidth) * dia * dia * PI/4;// volume centrePieceTest
+	volTotal = volOffConstr + volConstr;
+	volOffCenter = volTotal - volCenter;
+	concCenter = scale3 * 2/volCenter;
+	concOffCenter = scale3 * 4/volOffCenter;
+	
+	str = "--- simulation data ---";
+	str = str + "\ncentrePieceTest [um]= " + d2s(centrePieceTest/scale, 2);
+	str = str + "\ntotal volume [um^3] = " + d2s(volTotal/scale3, 2);
+	str = str + "\nconstr volume [um^3] = " + d2s(volConstr/scale3, 2);
+	str = str + "\noff constr vol [um^3] = " + d2s(volOffConstr/scale3, 2);
+	str = str + "\ncenter volume [um^3] = " + d2s(volCenter/scale3, 2);
+	str = str + "\noff-center volume = " + d2s(volOffCenter/scale3, 2);
+
+	str = str + "\nConcCenter = " + d2s(concCenter, 4);
+	str = str + "\nConcOffCenter = " + d2s(concOffCenter, 4);
+
+	str = str + "\nFluorTotal. = " + 6;
+	str = str + "\nFluorCenter = " + 2;
+	
+	setMetadata("Info", str);
+	
+	
+}
+
+
+// ____ end Coli
+
+
+// ____ begin Bacillus
+/*
+
+//Arranges all cells straightened in a single hyperstack
+macro "Make StraightCells"{
+	bandHeight = 33;
+
+	maxCh = ojGetImageValue(1, "channels");
+	if (maxCh != 3)	exit("Linked Images must have 3 channels");
+	run("Colors...", "selection=cyan");
+	ojHideResults();
+
+	ojDeleteColumn("Constr");//delete coli left-overs
+	ojDeleteColumn("Volume");
+	ojDeleteColumn("Constr");
+	ojDeleteColumn("FlChannel");
+	ojDeleteColumn("FluorTotal");
+
+	ojInitColumn("barX");
+	ojInitColumn("barY");
+	ojInitColumn("barW");
+	ojInitColumn("barH");
+
+	ojSetColumnProperty("bar*", "digits", 0);
+	ojSetColumnProperty("bar*", "visible", 0);
+	run("Close All");
+	maxObj = ojNObjects();
+	k100 = 100;
+	labelWidth = 30;
+	colWidth = k100 + labelWidth;
+	k50 = 50;
+	ojClose("StraightCells.tif");
+	pxWidth = ojGetVoxelSize(1, "x");
+	maxLen = round(ojGetStatistics("Axis", "max")/pxWidth) + 50;
+	if (maxLen < 1200) maxLen = 1200;
+	maxDia = ojGetStatistics("Dia", "max")/pxWidth;
+	//maxCh = 3;
+	//ojShowImage(1);//speed trick removed 06.03.14 18:56
+	newImage("Monitor", "16-bit black", maxLen, 700, 1);
+	monitorID = getImageID;
+	setBatchMode(true);
+
+	run("Hyperstack...", "title=StraightCells.tif type=16-bit display=Color width=" + maxLen + " height="+ 5000 + " channels=" + maxCh + " slices=1 frames=1");
+	straightCellsID = getImageID;
+	Stack.setChannel(1);
+	run("Grays");
+	Stack.setChannel(2);
+	run("Cyan");
+	Stack.setChannel(3);
+	run("Green");
+	barX = labelWidth;
+	barY = 0;
+	//debug;
+	filledX = 0;
+	startTime = 0;
+	setFont("SansSerif" , 14, "antiliased");
+
+	for (img = 1; img <= ojNImages(); img++){//
+		ojShowImage(img);
+		currentID = getImageID;
+		Stack.getDimensions(width, height, channels, slices, frames);
+		for (obj = ojFirstObject(img); obj<= ojLastObject(img); obj++){
+			for (ch=1; ch<= maxCh; ch++){
+				selectImage(currentID);//22.7.13 18:12 
+				ojShowObject(obj);
+				ojItemToRoi();
+				Stack.setChannel(ch);
+				
+				run("Straighten...", "line=&bandHeight");
+				rename("tmp");
+				run("Select All");
+				barW = getWidth;
+				barH = getHeight;	
+				run("Copy");
+				selectImage(straightCellsID);
+				Stack.setChannel(ch);
+				if (ch == 1){
+					if (filledX + labelWidth + barW>= getWidth){
+						barY += k50;
+						filledX = 0;
+					}
+					barX = filledX +labelWidth;
+					filledX = barX + barW;
+					
+					ojSetResult("barX", obj, barX);
+					ojSetResult("barY", obj, barY);
+					ojSetResult("barW", obj, barW);
+					ojSetResult("barH", obj, barH);
+					label = "" + obj;
+					lw= getStringWidth(label);
+					makeText(""+obj, barX - lw-4,  barY  + 12);
+					run("Add Selection...");
+				}
+				makeRectangle(barX, barY, barW, barH);
+				run("Paste");
+				run("Select None");
+				if (ch == 2){
+					selectImage(monitorID);
+					if (barX == labelWidth){
+						makeRectangle(0, k50, getWidth, getHeight - k50);
+						run("Translate...", "x=0 y=" + (-k50));
+						
+					}
+					makeRectangle(barX, getHeight - k50, barW, barH);
+					run("Paste");
+					
+					
+					if (getTime > startTime+2000){
+						setColor("white");
+  						drawString(""+round(obj/ojNObjects()* 100) + "%", getWidth/2-30, 25, "black");
+						makeRectangle(0, getHeight/2, getWidth, getHeight/2);
+						run("Enhance Contrast", "saturated=0.05");
+						
+						startTime = getTime;
+					}
+						
+					run("Select None");
+					
+				}
+			}
+			close("tmp");;
+		}
+		selectImage(currentID);
+		close;
+	}
+	setBatchMode("exit and display");//12.1.2013
+	close("Monitor");
+	selectImage(straightCellsID);
+	makeRectangle(0,0, getWidth, barY + k50);					
+	run("Crop");
+ 	for (ch = 1; ch <= 3; ch++){
+ 		Stack.setChannel(ch);
+		run("Enhance Contrast", "saturated=0.35");
+	}
+	saveStraightCells();
+	run("Select All");
+	run("Set... ", "zoom=100");
+	run("Select None");
+	ojShowImage(1);
+}
+
+
+function showStraightCells(){
+	title = "StraightCells.tif";
+	path = ojGetProjectPath();
+	path += title;
+	if (isOpen(title))
+		selectImage(title);
+	else if (File.exists(path))
+		open(path);
+	else exit("File 'StraightCells.tif' not found");
+	straightCellsID = getImageID;
+}
+
+function saveStraightCells(){
+	selectImage(straightCellsID);
+	path = ojGetProjectPath();
+	path = path + "StraightCells.tif";
+	saveAs("Tiff", path);
+}
+
+macro "Find All Septa"{
+	if (ojColumnNumber("SeptaPos") > 0){
+		for (obj = 1; obj <= ojNObjects(); obj++){
+			str = ojResultString("SeptaPos", obj);
+			if (indexOf(str, ".") >=0){//manual positions have dec. point
+				showMessageWithCancel("This will clear manual septa");
+				obj = 1e9;//exit loop
+			}
+		}
+	}
+	ojInitTextColumn("SeptaPos");
+	maxObj =ojNObjects();
+	showStraightCells();
+	//septaChannel = getNumber("Detect septa in channel:", 2);
+	Stack.setChannel(septaChannel);
+	run("Remove Overlay");
+	startTime = 0;
+	for (obj = 1; obj <= ojNObjects(); obj++){
+		paintNumber(obj);
+		autoFindSepta(obj);
+	}
+	//updateDisplay;
+ }
+
+macro "-"{}
+
+macro "Add Septum [A]"{
+	straightEditor("a");	
+}
+macro "Delete Septum [D]"{
+	straightEditor("d");	
+}
+macro "Select back-forth [S]"{
+	straightEditor("s");	
+}
+macro "Show Profile [F]"{
+	straightEditor("f");	
+}
+function straightEditor(cmd){
+	command = getInfo("command.name");
+	obj = ojSelectedObject();
+	if (ojImageLink() > 0 && cmd == "s" && obj > 0){
+		showStraightCells();
+		makeRectangle(ojResult("barX", obj), ojResult("barY", obj), ojResult("barW", obj), ojResult("barH", obj));
+		exit;
+	}
+    if (!startsWith(command, "^"))
+        exit("Command must be invoked via shortcut key, while cursor is at desired position");
+
+	if(getTitle != "StraightCells.tif")
+		exit("This tool works only in 'StraightCells.tif'");
+	foundObj = 0;
+	getCursorLoc(x, y, z, flags);
+	
+	for (obj = 1; obj <= ojNObjects(); obj++){
+		sx = ojResult("barX", obj);
+		sy = ojResult("barY", obj);
+		sw = ojResult("barW", obj);
+		sh = ojResult("barH", obj);
+		if(x >= sx && x < sx + sw && y > sy && y < sy + sh +8 ){
+			foundObj = obj;
+			obj = 1e9;//exit loop
+		}
+	}
+	if (foundObj == 0){
+		questionMark();
+		exit;
+	}
+	relX = x -sx;//relative x
+
+	if (cmd == "a"){//insert a peak
+		insertSeptum(foundObj, sx, sy + sh, relX);
+	}
+	else if (cmd == "d"){//delete a peak
+		deleteClosestSeptum(foundObj, sx, sy + sh, relX);
+	}
+	
+	else if (cmd == "f"){
+		showPlot(foundObj);
+		wait(150);
+		showStraightCells();
+	}
+	else if (cmd == "s"){//show in stack
+		makeRectangle(sx, sy, sw, sh);
+		ojShowObject(foundObj);
+	}
+}
+
+macro "-"{}
+
+macro "Show Straight Cells"{
+	showStraightCells();
+}
+
+macro "Rebuild Overlay"{
+	showStraightCells();
+	run("Remove Overlay");
+	ojHideResults();
+	ojInitColumn("allSepta");
+	ojInitColumn("manSepta");
+	ojInitColumn("manTrace");
+	ojSetColumnProperty("allSepta", "digits", 0);
+	ojSetColumnProperty("manSepta", "digits", 0);
+	ojSetColumnProperty("manTrace", "digits", 0);
+	for (obj = 1; obj <= ojNObjects(); obj++){
+		paintNumber(obj);
+		paintTrianglesTmp(obj);
+		//if all points are on pixel grid, manual = true
+		ojSelectObject(obj);
+		maxPts = ojNPoints();
+		posArr = newArray(maxPts);
+		for (jj = 1; jj <= maxPts; jj++){
+			x05 = (ojXPos(jj) * 12 + 0.5) %1;//=0.5 if magnif =1,2,3,4,6,12
+			posArr[jj - 1] = x05;
+		}
+		Array.getStatistics(posArr,dummy, dummy, dummy,  stdDev);
+		if (stdDev > 0.003)
+			ojSetValue("manTrace", obj, NaN);
+		else
+			ojSetValue("manTrace", obj, 1);
+	}
+}
+
+macro "Add Septum Markers to Orig. Stack"{
+	
+	for (obj = 1; obj <= ojNObjects(); obj++){
+		septArr = split(ojResultString("SeptaPos", obj));
+		maxSepta = septArr.length;
+		
+		for (jj = 0; jj < maxSepta; jj++){
+			septArr[jj] = parseInt(septArr[jj]);
+		} 
+		ojShowObject(obj);
+		ojSelectItem("Axis", 1);
+		ojvInitStack("2d");
+		ojvPushItem();
+		len = ojvCalculate("totalpath");
+		ojOpenObject(obj);
+		ojSwitchToItem("Septum");
+		for (sept = 0; sept < maxSepta; sept++){
+			septPos = septArr[sept];
+			xx = ojvCalculate("partialpositionx "+ septPos/len);
+			yy = ojvCalculate("partialpositiony "+ septPos/len);
+			ojSwitchToItem("Septum");
+			ojSetMarker(xx, yy);
+			ojCloseItem();
+		}
+		ojCloseObject();
+	}
+	ojSetTool(0);
+
+}
+
+macro "Calc GFP Segments" {
+	ojInitTextColumn("GFPfluor");
+	ojInitTextColumn("GFPMean");
+	ojInitTextColumn("GFPMax");
+	calcGFP();
+	ojShowResults();
+	linearGfpTable();
+}
+
+function calcGFP(){
+//calculates int. flor in rectangle rois in GFP channel of straight cells
+//using column "SeptaPos"
+	run("Set Measurements...", "area mean max integrated");
+	showStraightCells();
+	Stack.setChannel(GFPchannel);
+	ojHideResults();
+	//ojDeleteColumn("i_*");
+	cellCount = 0;
+	//ojInitColumn("_GFP");
+	roiManager("reset");
+	for (obj =1; obj <= ojNObjects(); obj++){
+		intFluorStr = "";
+		meanFluorStr = "";
+		maxFluorStr = "";
+		barX = ojResult("barX", obj);
+		barY = ojResult("barY", obj);
+		barW = ojResult("barW", obj);
+		barH = ojResult("barH", obj);
+		bandH = barH;//height of evaluation rectangle, default = 33
+//		bandH = 7;//odd number preferred
+		jj = 1;
+		left = barX;
+		posArr = septaToArray(obj);
+		for (jj = 0; jj <= posArr.length; jj++){
+			if (jj < posArr.length)
+				right = barX + round(posArr[jj]);
+			else
+				right = barX + barW;
+			centerY = barY + barH/2;
+			
+			makeRectangle(left, centerY - bandH/2,  right - left, bandH);
+			roiManager("add");
+
+			List.setMeasurements;
+			intFluor = List.getValue("RawIntDen") / 1e6;;
+			intFluorStr += d2s(intFluor, -2) + " ";
+
+			meanFluor = List.getValue("Mean");
+			meanFluorStr += d2s(meanFluor, -2) + " ";
+			
+			maxFluor = List.getValue("Max");
+			maxFluorStr += d2s(maxFluor, -2) + " ";
+
+			left = right;
+			cellCount++;
+			//ojSetResult("_GFP",cellCount, intFluor);
+		}	
+		ojSetResult("GFPfluor", obj, intFluorStr);
+		ojSetResult("GFPMean", obj, meanFluorStr);
+		ojSetResult("GFPMax", obj, maxFluorStr);
+	}
+	roiManager("Show All without labels");
+	waitForUser;
+	roiManager("reset");
+	run("Select None");
+
+}
+
+function linearGfpTable(){
+	title1 = "GFP Fluorescence Table";
+	title2 = "["+title1+"]";
+	f = title2;
+	if (isOpen(title1))
+	print(f, "\\Clear");
+	else
+		run("Table...", "name="+title2+" width=250 height=600");
+	selectWindow(title1);
+	print(f, "\\Headings:n   \tFilam#\tGFP_Int_Fl\tGFP_Mean\tGFP_Max\tLenPx\tLenUm");
+	n=0;
+	for (obj = 1; obj <= ojNObjects(); obj++){
+		scaleX = ojGetVoxelSize(ojOwnerIndex(obj), "x");
+		axisLen = ojResult("Axis", obj);
+		ww = ojResult("barW", obj);
+		//debug;
+		intFluorStr = ojResultString("GFPfluor", obj);
+		meanFluorStr = ojResultString("GFPMean", obj);
+		maxFluorStr = ojResultString("GFPMax", obj);
+		posStr = ojResultString("SeptaPos", obj);
+		posStr = posStr + " " + ww;
+		partsFLInt = split(intFluorStr);
+		partsFLMean = split(meanFluorStr);
+		partsFLMax = split(maxFluorStr);
+		partsPos = split(posStr);
+		prevPos = 0;
+		nSegs = lengthOf(partsFLInt);
+		for (part = 0; part < nSegs; part++){
+			thisPos = parseInt(partsPos[part]);
+			thisLen = (thisPos - prevPos);// * scale;
+			prevPos = thisPos;
+			print(f, ++n + "\t" + obj + "\t" + partsFLInt[part] + "\t" + partsFLMean[part] + "\t" + partsFLMax[part] + "\t" + thisLen+ "\t" +d2s(thisLen * scaleX,1));
+		}
+	}
+}
+
+
+function paintNumber(obj){
+	barX = ojResult("barX", obj);
+	barY = ojResult("barY", obj);
+	txt = "" + obj;
+	makeText(txt, barX - getStringWidth(txt) -2, barY + 10);
+	run("Add Selection...");
+}
+
+
+
+function autoFindSepta(obj){
+//create profile and replace septaString and 
+//paint triangles (clears manual septa)
+	barX = ojResult("barX", obj);
+	barY = ojResult("barY", obj);
+	barW = ojResult("barW", obj);
+	barH = ojResult("barH", obj);
+
+	makeRectangle(barX, barY + 15, barW, 6);
+	profile = getProfile();
+	Array.getStatistics(profile, min , max, mean, stDev);
+	thr =  (max - min)/4;
+	if (thr>10){
+		maxPositions = findMaxima(profile, thr);	
+		positionsTxt = "";
+		for (jj = 0; jj < maxPositions.length; jj++){
+			pos = maxPositions[jj];
+			minDistance = 10;// from cell end
+			if(pos >= minDistance && pos < profile.length - minDistance){ 	
+				positionsTxt = positionsTxt + " " + pos;
+				px = barX + pos;
+				py = barY + barH;				
+				paintTriangle(px, py, "red");
+			}
+		}
+		run("Select None");
+		ojSetResult("SeptaPos", obj, positionsTxt);
+	}
+	getDisplayedArea(x, y, w, h);
+	if (barY > y + h || barY < y){
+		makeRectangle(0, barY-50, getWidth, getHeight+500);
+		run("Set... ", "zoom=100");
+	}
+}
+
+function findMaxima(xx, minValley){
+	maxima = newArray(1000);
+	minima = newArray(1000);
+	max = xx[0];
+	min = xx[0];
+	maxPos = 0;
+	minPos = 0;
+	leftOK = false;
+	rightOK = false;
+
+	maxCount = 0;
+	for (jj = 1; jj < xx.length; jj++){
+		val = xx[jj];
+		if (val > min + minValley)
+			leftOK = true;
+		if (val > max && leftOK){
+			max = val;
+			maxPos = jj;
+		}
+		
+		if (val < max - minValley && leftOK){
+;
+			maxima[maxCount++] = maxPos;
+			leftOK = false;
+			min = val;
+			max = val;
+		}
+		if (val < min){
+			min = val;
+			if (!leftOK)
+				max = val;
+		}
+	}
+	maxima = Array.trim(maxima, maxCount);
+	return maxima;
+}
+
+
+function paintTriangle(x, y, color){
+	makePolygon(x, y, x + 4, y + 4, x - 4, y + 4);
+	
+	run("Properties... ", "fill=" + color);
+	run("Add Selection...");
+	run("Select None");
+
+}
+
+function paintTrianglesTmp(obj){
+	ww = ojResult("barW", obj);
+	hh = ojResult("barH", obj);
+	xx = ojResult("barX", obj);
+	yy = ojResult("barY", obj);
+	arr = septaToArray(obj);
+	nManualSepta = 0;
+	for (jj=0; jj < arr.length; jj++){
+		x = abs(arr[jj]);
+		manual = x != round(x);
+		x = round(x);
+		if (manual){
+			paintTriangle(xx + x, yy + hh, "orange");
+			nManualSepta++;
+		}
+		else
+			paintTriangle(xx + x, yy + hh, "red");
+	}
+	ojSetResult("allSepta", obj, arr.length);
+	ojSetResult("manSepta", obj, nManualSepta);
+	
+}
+
+function deleteClosestSeptum(obj, sx, sy, relX){
+	//deletes closest septum and paints it black in overlay
+	run("Select None");
+	arr = septaToArray(obj);
+	dxMin = 1e9;
+	for (jj=0; jj < arr.length; jj++){
+		dx = abs(arr[jj] - relX);
+		if (dx < dxMin){
+			dxMin = dx;
+			minPos = jj;
+		}
+	}
+	if (dxMin >= 8){
+		questionMark();
+		return;//not close enough
+	}
+	killX = arr[minPos];	
+	paintTriangle(sx + killX, sy, "black");
+	arr[minPos] = 1e9;//for removing max from end of sorted array
+	Array.sort(arr);
+	arr = Array.trim(arr, arr.length-1);
+	sPos = arrayToString(arr);
+	ojSetResult("SeptaPos", obj, sPos);
+}
+
+
+function septaToArray(obj){  //return all septa positions as array
+	str = ojResultString("SeptaPos", obj);
+	if (lengthOf(str) == 0)
+		return newArray(0);
+	septArr = split(str);
+
+	maxSepta = septArr.length;	
+	for (jj = 0; jj < maxSepta; jj++)
+		septArr[jj] = parseFloat(septArr[jj]);
+	return septArr;
+}
+
+function questionMark(){
+	getCursorLoc(x, y, z, flags);
+	makeText(" ? ", x +10, y-8);
+	wait(333);
+	run("Select None");
+}
+
+function insertSeptum(obj, sx, sy, relX){
+	//inserts a septum at x position and updates overlay
+	paintTriangle(sx + relX, sy, "orange");
+	arr = septaToArray(obj);
+	arr = Array.concat(newArray(1), arr);
+	arr[0]=relX + 0.01;//0.01 indicates manual septum
+	Array.sort(arr);
+	sPos = arrayToString(arr);
+	ojSetResult("SeptaPos", obj, sPos);
+}
+
+function arrayToString(arr){
+	sPos = "";
+	for (jj=0; jj < arr.length; jj++)
+		sPos = sPos + arr[jj] + " ";
+	return sPos;
+}
+
+function showPlot(obj){
+//creates a plot and paints automatic and manual bullets
+	ww = ojResult("barW", obj);
+	hh = ojResult("barH", obj);
+	xx = ojResult("barX", obj);
+	yy = ojResult("barY", obj);
+
+
+
+	plotLocX = 5;
+	plotLocY = 500;
+	if (isOpen(singlePlotID)){
+		selectImage(singlePlotID);
+		getLocationAndSize(plotLocX, plotLocY, dummy, dummy);
+	}				
+	close("Plot*");
+	showStraightCells();
+	Stack.setChannel(septaChannel);
+	makeRectangle(xx, yy+ 15, ww, 6);
+	sProfile = getProfile;
+	run("Profile Plot Options...", "width=&ww height=100 draw");
+	run("Plot Profile");
+	singlePlotID = getImageID;
+	setLocation(plotLocX, plotLocY);//put at same place
+
+	rename("Plot obj = " + obj);
+	setForegroundColor(64,64,64);
+	changeValues(64, 70, 70);
+	maxPositions = septaToArray(obj);
+	Array.getStatistics(sProfile, min, max);
+	thr =  (max - min)/4;
+	//if (thr>10)
+	;
+	for (jj =0; jj<maxPositions.length; jj++){
+		xval1 = maxPositions[jj];
+	
+		manual = xval1 != round(xval1);//non-integer for manual bullets
+		xval1 = round(xval1);
+		yval1 = sProfile[xval1];
+		yval2 = yval1 - thr;
+		xval2 = xval1;
+		toUnscaled(xval1, yval1);
+		toUnscaled(xval2, yval2);
+		xval2 = round(xval2);
+		yval2 = round(yval2);
+		makeOval(xval1-5, yval1-5, 10, 10);
+		if (manual)
+			changeValues(255, 255, 68);
+		else{
+			changeValues(255, 255, 64);
+			for (sign = -1; sign <=1; sign+=2){
+				for(kk = 0; kk < 200; kk++){
+					x = xval2 + kk * sign;
+					y=  yval2;
+					vv = getPixel(x, y);
+					if (vv == 0)
+						kk = 1e9;
+					else
+						setPixel(x, y, 64);
+					}
+				}
+			}
+		}
+	setOption("Changes", false);
+	run("RGB Color");
+	
+	run("Select All");
+	changeValues(0x0404040, 0x0404040, 0x0ff44ff);
+	changeValues(0x0444444, 0x0444444, 0x0ff8800);
+	run("Select None");
+}
+
+// ____ end Bacillus
+*/
+
+
+
+
+
+
+function showOutlines(){
+	img = ojImageLink();
+	if (!(img > 0))
+		exit ("linked image must be in front");
+	
+	hyp = is("Composite") || is("Hyperstack");
+	if (hyp) {
+		Stack.getPosition(channel, slice, frame);
+		Stack.setChannel(1);
+		Stack.setDisplayMode("grayscale");
+	}
+	for (obj = ojFirstObject(img); obj <= ojLastObject(img); obj++){
+		ojSelectObject(obj);
+		if (ojZPos(1) == getSliceNumber){
+			thr = ojResult("Thr", obj);
+			setThreshold(0, thr);
+			run("Create Selection");
+			resetThreshold();
+			break;
+		}
+	}
+	ojSelectObject(0);
+	if (hyp) {
+		Stack.setPosition(channel, slice, frame);
+	}
+}
+
+
+//closes any linked images and re-opens all them virtually
+function openAllVirtually(){
+	path = ojGetProjectPath();
+	for (img = 1; img <= ojNImages(); img++){
+		title = ojGetImageName(img);
+		if (isOpen(title)){
+			selectImage(title);
+			close;
+		}
+		arg = "open=[" + path + title + "]";
+		run("TIFF Virtual Stack...", arg);
+		Stack.getDimensions(width, height, channels, slices, frames);//24.8.2011
+		if (channels > 1)//24.8.2011
+			Stack.setDisplayMode("composite");
+	}
+}
+
+
+
+//Convert a bestfitting ellipse to a bestfitting rod
+function ellipseToRod(major, minor){
+  aspectE = major/minor;
+  area = major * minor * PI/4;
+  qq = 1/12 * (6 * aspectE - 3 * PI   + sqrt(-24 * (4 - 4 * aspectE)  + (-6 * aspectE + 3 * PI)*(-6 * aspectE + 3 * PI)));
+
+  rad = sqrt(area)/sqrt(4 * qq  + PI);
+  len2 = 2 * (rad +qq * rad);
+  dia2 = 2 * (rad);
+  arr = newArray(2);
+  arr[0] = len2;
+  arr[1] = dia2;
+  return arr;
+}
+
+//shows object zoomed and temporarily highlighted by circle roi
+function showZoomed(obj, zoomFactor){
+	if(obj<1 || obj>ojNObjects()){
+		beep;
+		exit;
+	}
+
+	if (obj == 0) exit;
+	rrOuter = 100;
+	ojShowObject(obj);
+	x1 = ojXPos(1);
+	y1 = ojYPos(1);
+	x2 = ojXPos(ojNPoints());
+	y2 = ojYPos(ojNPoints());
+	xc = (x1 + x2)/ 2;
+	yc = (y1 + y2)/ 2;
+	rrInner = 10 + 0.5*sqrt(pow((x2 - x1), 2) + pow((y2 - y1), 2));
+	ojZoom(zoomFactor, xc, yc);//zoom at factor 3
+	makeOval(xc-rrInner, yc - rrInner, rrInner*2, rrInner*2);
+	wait(300);
+	run("Select None");
+}
+
+//Selects the hyperstack channel that matches currently active item.
+function 	fixUnderlyingChannel(){
+	defineBindings("*");
+	activeItem = ojActiveItemName();
+	len  = selectedNames.length;
+	for (jj = 0; jj < len; jj++){
+		if (selectedNames[jj] == activeItem){
+			channel = selectedChannels[jj];
+			Stack.setChannel(channel);
+		}
+	}
+}
+
+
+function sqr(a){
+	return a*a;
+}
+
+
+//returns center as array of x and y, or x[0] = none if area too small
+function setMidPoint(){
+		List.setMeasurements;
+		x=List.getValue("XM");
+		y=List.getValue("YM");
+		center = newArray(x, y);
+		mean = List.getValue("Mean");
+		area = List.getValue("Area");
+		whiteArea = mean*area/255;
+		if (whiteArea/step * pxSize > maxDia){
+			center[0] = NaN;
+			fail = "MaxDia";
+		}
+		if (getPixel(round(x), round(y)) != 255)
+			center[0] = NaN;
+		if (mean == 0 || whiteArea < minArea || isNaN(x)|| isNaN(y)) {
+			center[0] = NaN;
+		}
+		return center;
+}
+
+
+//Set item markers from array; but avoids short end pieces
+function markItem(iType, arrX, arrY){
+	len = lengthOf(arrX);
+	if (iType == "selection"){//for debug inspection
+		makeSelection("polyline", arrX, arrY);
+		return;
+	}
+	if (iType != "*")
+		ojSwitchToItem(iType);
+	for (jj = 0; jj< len; jj++){
+		x = arrX[jj];
+		y = arrY[jj];
+		if (x >= 0)
+			ojSetMarker(x, y);
+	}
+	ojCloseItem();
+}
+
+
+
+//use current frame; get mean, min and max of down-sized thumbnail, return threshold
+function calcThreshold(){
+	if (getTitle != "HiddenSlice") exit("error: need hiddenslice");
+	if (is("Inverting LUT")) exit("Error: Inverted LUT");
+	pid = getImageID;
+	run("Select None");
+	//run("Duplicate...", "title=dummy channels=1-2 frames=1-4");
+	run("Scale...", "x=0.25 y=0.25  average create title=dummy");
+	if (nSlices !=1) exit ("slice>1");
+	run("Median...", "radius=2 stack");
+
+	if (thrMethod == "Custom"){
+		max = 0;
+		mode = 0;
+		getRawStatistics(nPixels, mean, min);
+		getHistogram(values, counts, 256);
+		for (jj = 1; jj < 254; jj++){//exclude saturated for finding mode
+			if (counts[jj] > max){
+				max = counts[jj];
+				mode = values[jj];
+			}
+		}	
+		thr = mode - round(thrFraction * (mode - min));
+	}
+	else {
+		setAutoThreshold(thrMethod);
+		getThreshold(lower, thr);
+	}
+
+	close;
+	selectImage(pid);
+	return thr;
+}
+
+
+//queries user to continue depending on caps lock and first time
+function inspect(msg, firstTime){
+	caps = is("Caps Lock Set");
+	if (firstTime || (caps)){
+		msg = msg + "\nKeep Caps Lock key down to remain in Inspection Mode";
+		msg = msg + "\nUse Esc to abort";
+		msg = msg + "\n---\nClick OK to Continue";
+		time = getTime - startTime;
+		waitForUser("Inspection Mode", msg);
+		startTime = getTime - time;
+	}
+}
+
+
+//shows an object in current slice, but avoids ojShowObject if possible
+function myShowObject2(obj, slc){
+	if (ojOwnerIndex(obj) != ojImageLink())
+		ojShowObject(obj);
+	setSlice(slc);
+}
+
+
+//Opens each linked stack. First channel is assumed to be phase contrast.
+//The other channels are assumed to be fluorescent images,
+//from which the individual background (=modal value) will be calculated.
+//Only central 80% of width and of height are used for this calculation.
+//Before actually subtracting backgrounds and saving, user can delete
+//rows from the table, or abort macro via esc key.
+macro "Subtract Fluor. Backgrounds ..."{
+	nChannels = 0;
+	for (img = 1; img <= ojNImages(); img++)
+		nChannels = maxOf(nChannels, ojGetImageValue(img, "channels"));
+	Dialog.create("Subtract Fluorescence Backgrounds");
+	for (jj = 2; jj <= nChannels; jj++)
+		Dialog.addCheckbox("Channel " + jj, true);
+
+	Dialog.addMessage("*Keep Caps Lock down to inspect images");
+		
+		
+  	Dialog.show();
+   	channelsChoice = newArray(nChannels);
+	for (jj = 2; jj <= nChannels; jj++)
+		channelsChoice[jj-1] = Dialog.getCheckbox;  
+		 	
+	for (img = 1; img <= ojNImages(); img++){
+		close(ojGetImageName(img));
+	}
+
+	title1 = "Backgrounds.txt";
+	title2 = "["+title1+"]";
+	f = title2;
+	if (isOpen(title1))
+		print(f, "\\Clear");
+	else
+		run("Table...", "name="+title2+" width=450 height=500");     
+	headers = "\\Headings:Img\tfrm";
+	for (col= 2; col <=nChannels; col++){
+		headers = headers + "\tBackgnd_" + col;
+	}
+	print(f, headers);
+	run("Set Measurements...", "modal limit");//11.7.2013
+	toBeCorrected = 0;
+	for (img = 1; img <= ojNImages(); img++){
+		ojShowImage(img);
+		if (endsWith(getTitle, ".tiff"))
+			exit("Can handle .tif, but not .tiff extension") ;
+		changed = false;
+		run("Select None");
+		Stack.getDimensions(width, height, channels, slices, frames);
+	
+		for (slice = 1; slice <= slices; slice++){
+			for(frame = 1; frame <= frames; frame++){
+				msg = getTitle + "\t" + frame;
+				for (channel = 2; channel <= channels; channel++){
+					msg += "\t";
+					if(channelsChoice[channel-1]){
+						Stack.setPosition(channel, slice, frame);
+						makeRectangle(getWidth * 0.1, getHeight * 0.1, getWidth * 0.8, getHeight * 0.8);
+						getRawStatistics(area, mean);
+						setThreshold(0, mean);
+						id = getImageID;
+						close("Histogram*");
+						if (is("Caps Lock Set"))
+							run("Histogram");
+						selectImage(id);
+						List.setMeasurements;
+						backgnd = List.getValue("Mode");//excludes upper saturation
+						setThreshold(0, backgnd);
+						inspect("Background = " + backgnd, false);
+						msg += "" + backgnd;
+						if(backgnd > 0)
+							toBeCorrected++;
+						run("Select None");
+						resetThreshold;
+					}
+					else msg += "x";//not measured
+				}		
+				print(f, msg);
+			}
+		}
+		if (changed)
+			saveAs("Tiff", ojGetProjectPath() + getTitle);
+		if (img != ojNImages())
+			close;
+	}
+	run("Set Measurements...", "area mean");//remove  'limit'
+	run("Close All");
+	while (isOpen("Clipboard")){selectWindow("Clipboard"); run("Close");}
+	selectWindow("Backgrounds.txt");
+	if (toBeCorrected == 0)
+		exit("All backgrounds are already zero");
+	String.copy(getInfo("window.contents"));
+	Dialog.create("Fluor. Backgrounds");
+	Dialog.addMessage("Subtract Background from " + toBeCorrected +" frame(s) ?\n");
+	Dialog.addCheckbox("Edit Table 'Background.txt'", 0);
+	
+  	Dialog.show();
+	selectWindow("Backgrounds.txt");
+  	if (Dialog.getCheckbox)
+  		waitForUser("Subtract Backgrounds", "You can now delete rows in 'Backgrounds.txt'\n (Or choose 'File>New>System Clipboard' for full edit)\n\t\n Click 'OK' to subtract or press 'Esc' to stop");
+	s = getInfo("window.contents");
+	if (!startsWith(s, "Img")) exit("Invalid table contents");
+	toBeSaved = "";
+	lines = split(s, "\n");	
+	headers = split(lines[0], "\t");
+	for (line = 1; line < lines.length; line++){
+		parts = split(lines[line], "\t");
+		name = parts[0];
+		if (name != toBeSaved && toBeSaved !=""){
+			selectImage(toBeSaved);
+			save(ojGetProjectPath() + toBeSaved);
+			toBeSaved = "";
+		}		
+		frm = parseInt(parts[1]);
+		for (part = 2; part < parts.length; part++){
+			chn = parseInt(substring(headers[part], lengthOf("Backgnd_")));
+			backgnd = parseInt(parts[part]);//can be "x", resulting in NaN
+			if (backgnd != 0){
+				if (isOpen(name))
+					selectImage(name);
+				else
+					open(ojGetProjectPath() + name);
+				close("\\Others");
+				Stack.setPosition(chn, 1,  frm);
+				run("Select None");
+				run("Subtract...", "value=" + backgnd);
+				run("Enhance Contrast", "saturated=0.05");
+				toBeSaved = name;						
+			}			
+		}
+	}
+	if (toBeSaved != "")
+		save(ojGetProjectPath() + toBeSaved);
+}
+
+
+
+
+
+/*
+//Tanneke begin
+
+
+//twins:
+//calculates volume of two intersecting coli shapes, where
+//len is rod length, diaS is diameter of single cell
+//and ww is total width of the dual-cylinder
+// http://de.wikipedia.org/wiki/Kreissegment
+// http://en.wikipedia.org/wiki/Spherical_cap
+
+function getTwinVolume(len, diaS, ww){
+	if (ww > diaS * 2)
+		diaS = ww/2;//++ changed 13-04-2013
+	if (ww < diaS)
+		diaS = ww;//++ changed 13-04-2013
+		
+	r = diaS/2;  //radius
+	cylLen = len - diaS; //cylinder length
+	h = diaS - ww/2; //half overlap
+	//a1 is half overlap area of circlular cross section:
+	a1 = r * r * acos(1 - h/r) - sqrt(2 * r * h - h * h) * (r - h);
+	v1 = a1 * cylLen; //half overlap volume cylinders
+	v2 = PI * h * h / 3 * (3 * r - h); //half overlap volume spheres
+	vColi = cylLen * r * r * PI + r * r * r * PI * 4/3;
+	vTotal = 2* (vColi - v1 - v2);
+	return vTotal;
+}
+
+
+
+//twins:
+macro "Swap Dia and Axis"{
+	if (ojSelectedObject() == 0)
+		return;
+	ojSelectItem("Axis", 1);
+	axisPoints = ojNPoints();
+	axisX1 = ojXPos(1);
+	axisY1 = ojYPos(1);
+	axisX2 = ojXPos(axisPoints);
+	axisY2 = ojYPos(axisPoints);
+	ojSelectItem("Dia", 1);
+	diaX1 = ojXPos(1);
+	diaY1 = ojYPos(1);
+	diaX2 = ojXPos(2);
+	diaY2 = ojYPos(2);
+//	ojMovePoint(n, x, y, z)
+
+	ojMovePoint(1, axisX1, axisY1, -1);
+	ojMovePoint(2, axisX2, axisY2, -1);
+	ojSelectItem("Axis", 1);
+	ojMovePoint(1, diaX1, diaY1, -1);
+	ojMovePoint(2, diaX2, diaY2, -1);
+	for (pt = 3; pt <= axisPoints; pt++){
+		ojMovePoint(pt, diaX2, diaY2, -1);	
+	}
+}
+
+
+//creates collective fluorescence profile perpendicular to axis, ch=2
+macro "Transversal Profiles"{
+	dir = ojGetProjectPath();
+	run("Close All");
+	setBatchMode(true);
+
+
+	accuA = newArray(101);//assym.profile
+	accuS = newArray(101);//sym profile
+	
+	for (img = 1; img <= 1; img++){
+		title = ojGetImageName(img);
+		close(title);
+		open(dir+title);
+		Stack.setDisplayMode("color");
+		for (obj = ojFirstObject(img); obj <= ojLastObject(img); obj++){
+			if(ojQualified(obj)){
+				showProgress(obj/ojNObjects());
+				selectImage(title);
+				ojSelectObject(obj);
+				slc = ojZPos(1);
+				ojSelectItem("Dia", 1);
+				lw = ojGetItemLength();
+				ojSelectItem("Axis", 1);
+				setSlice(slc + 1);//channel 2
+				ojItemToRoi();
+				run("Straighten...", "line=&lw");
+				run("Select All");
+				setKeyDown("alt"); 
+				profile = getProfile;
+				profile = Array.resample(profile, 101);
+				close;
+
+				for (jj = 0; jj <= 100; jj++){
+					accuA[jj] += profile[jj];
+				}
+			}
+		}
+	}
+	setBatchMode("exit and display");
+	Array.getStatistics(accuA, min, max, mean, stdDev);
+	for (jj = 0; jj < 101; jj++){
+		accuA[jj] /= max;
+	}
+	for (jj = 0; jj <= 50; jj++){
+		val = (accuA[jj] + accuA[100-jj]) /2;
+		accuS[jj] = val;
+		accuS[100 - jj] = val;
+
+	}
+
+	Plot.create("Collective transversal profile", "Position [%]", "Local brightness");
+	Plot.setLimits(0, 100, 0, 1);
+	Plot.setLineWidth(2);
+
+	Plot.setColor("#00cc00");
+	Plot.add("line", accuA);
+	Array.invert(accuA);
+	Plot.setColor("#eeeeee");
+	Plot.add("line", accuA);
+	Plot.setColor("red");
+	Plot.add("line", accuS);
+	Plot.show;
+}
+
+//Tanneke end
+*/
+

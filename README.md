@@ -2,11 +2,11 @@
 
 This repository contains scripts and templates used for image preprocessing and analysis in the publication specified below.
 
-## Publication [preprint]
+## Publication (preprint)
 
-Krister Vikedal, Synnøve B. Ræder, Ida Mathilde Riisnæs, Magnar Bjørås, James Booth, Kirsten Skarstad, and Emily helgesen (2024)</br>
-**RecN and RecA orchestrate an ordered DNA supercompaction following ciprofloxacin exposure of Escherichia coli**</br>
-bioRxiv</br>
+Krister Vikedal, Synnøve B. Ræder, Ida Mathilde Riisnæs, Magnar Bjørås, James Booth, Kirsten Skarstad, and Emily helgesen <br>
+**RecN and RecA orchestrate an ordered DNA supercompaction following ciprofloxacin exposure of Escherichia coli**<br>
+bioRxiv (2024)<br>
 doi: 
 
 Please see the Methods and Materials section of the paper for details on preprocessing and analysis. 
@@ -40,7 +40,9 @@ All scripts and templates for analysis of images with the Coli-Inspector and Mic
 
 ### Modified Coli-Inspector script
 
+We have customized the script of the ObjectJ-based [Coli-Inspector](https://sils.fnwi.uva.nl/bcb/objectj/examples/Coli-Inspector/Coli-Inspector-MD/coli-inspector.html) plugin (version 03f) to allow grouping of cells by image number and, consequently, by time frame. Please refer to the plugin's documentation for detailed instructions on its use. 
 
+To use the customized plugin, open the file `Coli-Inspector-03f-KVmod.ojj` in Fiji (ImageJ). The changes made to the original script can be reviewed in the corresponding file `Coli-Inspector-03f-KVmod.txt`, where code modifications are annotated with the comment `Added by KV`.
 
 ### Templates for MicrobeJ
 
@@ -51,4 +53,4 @@ Krister Vikedal
 
 ## Acknowledgements
 
-ChatGPT by OpenAI was utilized for suggesting code for scripts included in this repository.
+The customized script `Coli-Inspector-03f-KVmod.ojj` is based on the Coli-Inspector plugin (version 03f), developed by Norbert Vischer from the University of Amsterdam. The original plugin can be downloaded from the [documentation page](https://sils.fnwi.uva.nl/bcb/objectj/examples/Coli-Inspector/Coli-Inspector-MD/coli-inspector.html). ChatGPT by OpenAI was utilized for suggesting code for scripts included in this repository. 

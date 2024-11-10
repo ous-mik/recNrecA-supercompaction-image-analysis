@@ -5,8 +5,8 @@ This repository contains scripts and templates used for image preprocessing and 
 
 ## Publication (preprint)
 
-Krister Vikedal, Synnøve B. Ræder, Ida Mathilde Riisnæs, Magnar Bjørås, James Booth, Kirsten Skarstad, and Emily helgesen <br>
-**RecN and RecA orchestrate an ordered DNA supercompaction following ciprofloxacin exposure of Escherichia coli**<br>
+Krister Vikedal, Synnøve Brandt Ræder, Ida Mathilde Riisnæs, Magnar Bjørås, James Booth, Kirsten Skarstad, and Emily helgesen <br>
+**RecN and RecA orchestrate an ordered DNA supercompaction response following ciprofloxacin exposure in <i>Escherichia coli</i>**<br>
 bioRxiv (2024)<br>
 doi: 
 

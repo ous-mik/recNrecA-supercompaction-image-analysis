@@ -8,7 +8,7 @@ This repository contains scripts and templates used for image preprocessing and 
 Krister Vikedal, Synnøve Brandt Ræder, Ida Mathilde Riisnæs, Magnar Bjørås, James Booth, Kirsten Skarstad, and Emily helgesen <br>
 **RecN and RecA orchestrate an ordered DNA supercompaction response following ciprofloxacin exposure in <i>Escherichia coli</i>**<br>
 bioRxiv (2024)<br>
-doi: 
+doi: [10.1101/2024.11.15.623168](https://doi.org/10.1101/2024.11.15.623168)
 
 Please see the Methods and Materials section of the paper for details on preprocessing and analysis. 
 
@@ -40,13 +40,13 @@ Images in the `.lif` format were first saved as individual `.tif` images and the
 
 _See License Details_
 
-All scripts and templates for analyzing images with the [Coli-Inspector](https://sils.fnwi.uva.nl/bcb/objectj/examples/Coli-Inspector/Coli-Inspector-MD/coli-inspector.html) and [MicrobeJ](https://www.microbej.com/) plugins in Fiji (ImageJ) are located in the folder `Analysis`. 
+All scripts and templates for analyzing images with the ObjectJ project [Coli-Inspector](https://sils.fnwi.uva.nl/bcb/objectj/examples/Coli-Inspector/Coli-Inspector-MD/coli-inspector.html) and the [MicrobeJ](https://www.microbej.com/) plugin in Fiji (ImageJ) are located in the folder `Analysis`. 
 
 ### Modified Coli-Inspector script
 
-We have customized the script of the ObjectJ-based Coli-Inspector plugin (version 03f) to allow grouping of cells by image number and, consequently, by time frame. To use the customized plugin, open the file `Coli-Inspector-03f-KVmod.ojj` in Fiji (ImageJ). The changes made to the original script can be reviewed in the corresponding file `Coli-Inspector-03f-KVmod.txt`, where code modifications are annotated with the comment `Added by KV`.
+We have customized the embedded macros of the ObjectJ project Coli-Inspector (version 03f) to allow grouping of cells by image number and, consequently, by time frame. To use the customized embedded macros, open the file `Coli-Inspector-03f-KVmod.ojj` in Fiji (ImageJ). The changes made to the original embedded macros can be reviewed in the corresponding file `Coli-Inspector-03f-KVmod.txt`, where code modifications are annotated with the comment `Added by KV`.
 
-Please refer to the plugin's documentation for detailed instructions on its use. 
+Please refer to the project's documentation for detailed instructions on its use. 
 
 ### Templates for MicrobeJ
 
@@ -70,9 +70,9 @@ Please refer to the plugin's documentation for detailed instructions on its use.
 
 ## License Details
 
-Scripts for preprocessing in this repository are licensed under the MIT license, included in the `LICENSE` file. Modifications to the Coli-Inspector script and templates for MicrobeJ are also licensed under the MIT license, but note that the license applies exclusively to the contributions made by the author of this repository. 
+Scripts for preprocessing and the modifications to the Coli-Inspector macro script in this repository are licensed under the MIT license, included in the `LICENSE` file. Templates for MicrobeJ are also licensed under the MIT license, but note that the license applies exclusively to the contributions made by the author of this repository. 
 
-Permissions to distribute the customized version of Coli-Inspector and MicrobeJ templates have been requested from the original developers, but have not yet been granted or denied. Only the modifications are currently under the MIT license, and the original software remains under its respective rights held by the original developers. Users of the script and templates should respect the original licensing terms of the Coli-Inspector and MicrobeJ software until full permissions are obtained. 
+Permissions to distribute the MicrobeJ templates have been requested from the original developer, but have not yet been granted or denied. Only the modifications are currently under the MIT license, and the original software remains under its respective rights held by the original developers. Users of the templates should respect the original licensing terms of the MicrobeJ software until full permissions are obtained. 
 
 ## Author
 
@@ -80,4 +80,4 @@ Krister Vikedal
 
 ## Acknowledgements
 
-The customized script `Coli-Inspector-03f-KVmod.ojj` is based on the Coli-Inspector plugin (version 03f), developed by Norbert Vischer (University of Amsterdam). The original plugin can be downloaded from the [documentation page](https://sils.fnwi.uva.nl/bcb/objectj/examples/Coli-Inspector/Coli-Inspector-MD/coli-inspector.html). MicrobeJ was developed by Adrien Ducret (Université de Lyon), Yves Brun (Indiana University), and Christophe Grangeasse (Université de Lyon). The plugin can be downloaded from its [download website](https://www.microbej.com/download-2/). We thank Adrien Ducret (Université de Lyon) for assistance with MicrobeJ analysis and code development for tracking of foci, and Thierry Oms (Université Libre de Bruxelles) for assistance with kymograph plots. ChatGPT by OpenAI was utilized for suggesting code for scripts included in this repository.
+The customized embedded macros `Coli-Inspector-03f-KVmod.ojj` is based on the ObjectJ project Coli-Inspector (version 03f), developed by Norbert Vischer (University of Amsterdam). The original embedded macros can be downloaded from the [documentation page](https://sils.fnwi.uva.nl/bcb/objectj/examples/Coli-Inspector/Coli-Inspector-MD/coli-inspector.html). MicrobeJ was developed by Adrien Ducret (Université de Lyon), Yves Brun (Indiana University), and Christophe Grangeasse (Université de Lyon). The plugin can be downloaded from its [download website](https://www.microbej.com/download-2/). We thank Adrien Ducret (Université de Lyon) for assistance with MicrobeJ analysis and code development for tracking of foci, and Thierry Oms (Université Libre de Bruxelles) for assistance with kymograph plots. ChatGPT by OpenAI was utilized for suggesting code for scripts included in this repository.

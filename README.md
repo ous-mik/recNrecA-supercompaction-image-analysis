@@ -10,7 +10,7 @@ Krister Vikedal, Synnøve Brandt Ræder, Ida Mathilde Riisnæs, Magnar Bjørås,
 bioRxiv (2024)<br>
 doi: [10.1101/2024.11.15.623168](https://doi.org/10.1101/2024.11.15.623168)
 
-Please see the Methods and Materials section of the paper for details on preprocessing and analysis. 
+Please see the Material and Methods section of the paper for details on preprocessing and analysis. 
 
 
 ## Scripts for preprocessing
@@ -52,12 +52,13 @@ Please refer to the project's documentation for detailed instructions on its use
 
 In our study, we used two different versions of MicrobeJ for image analysis: 
 - **Main version 5.13p (1):** For creating kymographs and analyzing DNA distribution.
-- **Beta version 5.13p (13):** For tracking GFP-RecN and RecA-mCherry foci and analyzing their distribution and localization within cells. 
+- **Beta version 5.13p (13):** For tracking GFP-RecN and RecA-mCherry foci and analyzing their distribution and localization within cells. Also for classifying DNA compaction phenotypes.
 
 **Templates for analyzing all cells from each time frame:** 
 - `MJtemplate_AvgKymograph.xml`: To create kymographs.
 - `MJtemplate_RecNinDNA_tracking.xml`: To track RecN and assess its colocalization with DNA. 
 - `MJtemplate_RecAcolRecN_tracking.xml`: To track RecA and assess its colocalization with RecN.
+- `MJtemplate_ClassifyDNAcompactionPhenotypes.xml`: For classifying and comparing DNA compaction phenotypes.
 
 **Templates for single-cell analysis:** 
 - `MJtemplate_SingleCell_Kymograph_Profile.xml`: To create kymographs and analyze DNA distribution profiles for strains harboring only HU-mCherry. 

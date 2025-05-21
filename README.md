@@ -3,12 +3,12 @@
 This repository contains scripts and templates used for image preprocessing and analysis in the publication specified below.
 
 
-## Publication (preprint)
+## Publication
 
-Krister Vikedal, Synnøve Brandt Ræder, Ida Mathilde Riisnæs, Magnar Bjørås, James Booth, Kirsten Skarstad, and Emily helgesen <br>
-**RecN and RecA orchestrate an ordered DNA supercompaction response following ciprofloxacin exposure in <i>Escherichia coli</i>**<br>
-bioRxiv (2024)<br>
-doi: [10.1101/2024.11.15.623168](https://doi.org/10.1101/2024.11.15.623168)
+Krister Vikedal, Synnøve Brandt Ræder, Ida Mathilde Marstein Riisnæs, Magnar Bjørås, James Alexander Booth, Kirsten Skarstad, and Emily helgesen <br>
+**RecN and RecA orchestrate an ordered DNA supercompaction response following ciprofloxacin-induced DNA damage in <i>Escherichia coli</i>**<br>
+<i>Nucleic Acids Research</i> (2025)<br>
+doi: [10.1093/nar/gkaf437](https://doi.org/10.1093/nar/gkaf437)
 
 Please see the Material and Methods section of the paper for details on preprocessing and analysis. 
 
